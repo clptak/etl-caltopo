@@ -128,6 +128,31 @@ const MapResponse = Type.Object({
     }),
 });
 
+/**
+ * Any object of a Team Map - only the fields the sync relies on are required, as Assignments,
+ * Clues, Folders etc. each carry their own set of properties
+ */
+export const TeamMapFeature = Type.Object({
+    id: Type.String(),
+    properties: Type.Object({
+        class: Type.Optional(Type.String()),
+        title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+        description: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+        folderId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+        updated: Type.Optional(Type.Number()),
+    }, { additionalProperties: true }),
+    geometry: Type.Optional(Type.Any()),
+});
+
+const TeamMapResponse = Type.Object({
+    status: Type.String(),
+    result: Type.Object({
+        state: Type.Object({
+            features: Type.Array(TeamMapFeature),
+        }),
+    }),
+});
+
 export default class CalTopo {
     url: URL;
     verbose: boolean;
@@ -222,6 +247,22 @@ export default class CalTopo {
         const res = await fetch(url, { safeUrlAllow: [this.url.origin] });
         await CalTopo.assertBody(res);
         const body = await res.typed(MapResponse, { verbose: this.verbose });
+
+        return body.result.state.features;
+    }
+
+    /**
+     * Fetch every object of a Team Map with a service account - unlike map() this works for
+     * PRIVATE Maps, the Service Account needs at least READ permission on the Map
+     */
+    async teamMap(id: string, creds: Static<typeof Credentials>): Promise<Static<typeof TeamMapFeature>[]> {
+        const url = CalTopo.sign('GET', new URL(`/api/v1/map/${encodeURIComponent(id)}/since/0`, this.url), creds);
+
+        console.log(`ok - requesting ${url.pathname}`);
+
+        const res = await fetch(url, { safeUrlAllow: [this.url.origin] });
+        await CalTopo.assertBody(res);
+        const body = await res.typed(TeamMapResponse, { verbose: this.verbose });
 
         return body.result.state.features;
     }

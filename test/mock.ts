@@ -29,7 +29,7 @@ function signed(method: string, pathname: string, params: URLSearchParams): bool
 }
 
 /**
- * Minimal CalTopo API - signed Shared Locations & Team Map creation endpoints, a public map endpoint
+ * Minimal CalTopo API - signed Shared Locations, Team Map read & creation endpoints, a public map endpoint
  * and the Trackable Device position report endpoint, which rejects the Connect Key BADKEY
  */
 export async function mock(opts: {
@@ -104,6 +104,17 @@ export async function mock(opts: {
 
             res.writeHead(200, { 'Content-Type': 'text/plain' });
             return res.end('OK');
+        }
+
+        const team = url.pathname.match(/^\/api\/v1\/map\/([^/]+)\/since\/0$/);
+        if (team) {
+            if (!signed('GET', url.pathname, params)) return send(401, { status: 'error', message: 'bad signature' });
+
+            return send(200, {
+                status: 'ok',
+                timestamp: Date.now(),
+                result: { state: { type: 'FeatureCollection', features: opts.map ?? [] }, timestamp: Date.now() }
+            });
         }
 
         const map = url.pathname.match(/^\/api\/v1\/map\/([^/]+)\/since\/-500$/);

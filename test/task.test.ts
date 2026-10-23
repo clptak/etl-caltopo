@@ -457,3 +457,60 @@ test('outgoing - event:create without Team Account settings fails before any req
         await api.close();
     }
 });
+
+test('control - Sync source dry runs each pair with signed map reads and never submits', async () => {
+    const api = await mock({
+        map: [
+            { id: 'ct-1', type: 'Feature', properties: { class: 'Marker', title: 'From CalTopo' }, geometry: { type: 'Point', coordinates: [-111.65, 35.19] } },
+            { id: 'folder-1', type: 'Feature', properties: { class: 'Folder', title: 'Tracks' } }
+        ]
+    });
+
+    const logs: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
+
+    try {
+        const task = await Task.init();
+        const layer = {
+            id: 1,
+            connection: 1,
+            task: 'etl-caltopo-v5.16.1',
+            incoming: {
+                environment: { Source: { Mode: 'Sync', ...CREDS, MissionToken: 'etl.profile', Pairs: [{ MapId: 'MAP1', MissionGuid: 'mission-1' }], DryRun: true }, DEBUG: true },
+                ephemeral: {}
+            }
+        };
+
+        // @ts-expect-error partial layer for testing
+        task.fetchLayer = async () => layer;
+        // @ts-expect-error private in base
+        task.layer = layer;
+        task.client = (verbose: boolean) => new CalTopo({ url: api.base, verbose });
+
+        const read: string[] = [];
+        task.missionReader = () => ({
+            features: async (guid: string) => {
+                read.push(guid);
+                return [
+                    { id: 'ct-1', properties: { callsign: 'From CalTopo' }, geometry: { type: 'Point', coordinates: [-111.65, 35.19] } },
+                    { id: 'tak-1', properties: { callsign: 'Staging' }, geometry: { type: 'Point', coordinates: [-111.6, 35.2] } }
+                ];
+            }
+        });
+
+        let submitted = false;
+        task.submit = async () => { submitted = true; return true; };
+
+        await task.control();
+
+        assert.deepEqual(read, ['mission-1']);
+        assert.deepEqual(api.requests.map((r) => r.pathname), ['/api/v1/map/MAP1/since/0']);
+        assert.equal(submitted, false);
+        assert.ok(logs.some((l) => l.includes('dry run mission-1 -> MAP1: 2 Mission items, 2 CalTopo objects, 0 linked - create 1, adopt 1')));
+        assert.ok(logs.some((l) => l.includes('create - Staging (tak-1)')));
+    } finally {
+        console.log = log;
+        await api.close();
+    }
+});

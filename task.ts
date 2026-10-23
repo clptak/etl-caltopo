@@ -6,6 +6,10 @@ import ETL, { SchemaType, handler as internal, local, DataFlowType, InvocationTy
 import { coordEach } from '@turf/meta';
 import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, MapMode, MapSharing, LOCATION_TTL } from './lib/caltopo.js';
 import { PLIConfig, positionReport } from './lib/pli.js';
+import { ProfileTokenReader } from './lib/mission.js';
+import type { MissionReader } from './lib/mission.js';
+import { planTakToCalTopo, summary } from './lib/sync.js';
+import type { SyncState } from './lib/sync.js';
 
 const MapSource = Type.Object({
     Mode: Type.Literal('Map'),
@@ -33,8 +37,33 @@ const TeamSource = Type.Composite([
     description: 'Surfaces the live Shared Locations of devices reporting to the Team Account',
 });
 
+const SyncSource = Type.Composite([
+    Type.Object({
+        Mode: Type.Literal('Sync'),
+    }),
+    Credentials,
+    Type.Object({
+        MissionToken: Type.String({
+            description: 'CloudTAK Profile API Token of a dedicated service account whose TAK certificate can read the Missions - CloudTAK Mission routes do not accept Layer tokens yet',
+        }),
+        Pairs: Type.Array(Type.Object({
+            MapId: Type.String({ description: 'CalTopo Map ID - the Service Account needs at least READ permission on it' }),
+            MissionGuid: Type.String({ description: 'TAK Mission GUID' }),
+        }), {
+            description: 'CalTopo Maps synced with TAK Missions',
+        }),
+        DryRun: Type.Boolean({
+            default: true,
+            description: 'Log what would change in CalTopo without writing - only dry runs are supported so far',
+        }),
+    })
+], {
+    title: 'Mission Sync',
+    description: 'Syncs TAK Mission items to CalTopo Maps - dry run only',
+});
+
 const Env = Type.Object({
-    Source: Type.Union([MapSource, TeamSource]),
+    Source: Type.Union([MapSource, TeamSource, SyncSource]),
     'DEBUG': Type.Boolean({
         default: false,
         description: 'Print results in logs'
@@ -299,6 +328,11 @@ export default class Task extends ETL {
 
         const caltopo = this.client(env.DEBUG);
 
+        if (env.Source.Mode === 'Sync') {
+            await this.sync(caltopo, env.Source, env.DEBUG);
+            return;
+        }
+
         let features: Static<typeof Feature.InputFeature>[];
         if (env.Source.Mode === 'Map') {
             features = this.fromMap(await caltopo.map(env.Source.MapId));
@@ -322,6 +356,61 @@ export default class Task extends ETL {
 
     client(verbose: boolean): CalTopo {
         return new CalTopo({ verbose });
+    }
+
+    /** How Missions are read - swapped for a Layer scoped reader once CloudTAK supports one */
+    missionReader(source: Static<typeof SyncSource>): MissionReader {
+        return new ProfileTokenReader(this.etl.api, source.MissionToken);
+    }
+
+    /**
+     * Plan the TAK → CalTopo half of each Map/Mission pair and log it - nothing is written yet
+     * The links of a pair are kept in the Layer's ephemeral store under sync:<MapId>:<MissionGuid>
+     */
+    async sync(caltopo: CalTopo, source: Static<typeof SyncSource>, verbose: boolean): Promise<void> {
+        if (!source.DryRun) throw new Error('Mission Sync only supports DryRun so far');
+
+        const reader = this.missionReader(source);
+        const ephemeral = ((await this.fetchLayer()).incoming?.ephemeral ?? {}) as Record<string, unknown>;
+
+        for (const pair of source.Pairs) {
+            const key = `sync:${pair.MapId}:${pair.MissionGuid}`;
+            const state = (ephemeral[key] as SyncState | undefined) ?? { links: [] };
+
+            try {
+                // Both sides are read even when one fails, so one run reports every broken credential
+                const [missionRead, mapRead] = await Promise.allSettled([
+                    reader.features(pair.MissionGuid),
+                    caltopo.teamMap(pair.MapId, source),
+                ]);
+
+                const failures = [missionRead, mapRead]
+                    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+                    .map((r) => r.reason instanceof Error ? r.reason.message : String(r.reason));
+                if (failures.length) throw new Error(failures.join(' | '));
+
+                const mission = (missionRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['features']>>>).value;
+                const map = (mapRead as PromiseFulfilledResult<Awaited<ReturnType<CalTopo['teamMap']>>>).value;
+
+                const plan = planTakToCalTopo(mission, map, state);
+
+                console.log(`ok - dry run ${pair.MissionGuid} -> ${pair.MapId}: ${mission.length} Mission items, ${map.length} CalTopo objects, ${state.links.length} linked - ${summary(plan)}`);
+                for (const warning of plan.warnings) console.log(`warn - ${warning}`);
+
+                if (verbose) {
+                    for (const action of plan.actions) {
+                        const detail = action.op === 'skip' ? action.reason
+                            : action.op === 'adopt' ? (action.same ? 'same content' : 'content differs')
+                                : action.op === 'update' && action.conflict ? 'conflict - also changed in CalTopo'
+                                    : '';
+                        console.log(`  ${action.op} - ${action.title || '<untitled>'} (${action.op === 'skip' ? action.id : action.tak})${detail ? `: ${detail}` : ''}`);
+                    }
+                }
+            } catch (err) {
+                // One broken pair must not stop the others
+                console.error(`not ok - dry run ${pair.MissionGuid} -> ${pair.MapId}:`, err instanceof Error ? err.message : String(err));
+            }
+        }
     }
 
     /**

@@ -116,6 +116,39 @@ New Outgoing configs get a `Positions only` filter, so only `a-f-G` positions re
 queue. Callsigns still have to match a PLI rule in `.outgoing-env.json`. Unlike the
 Lambda, a message that fails is dropped rather than retried.
 
+## Mission Sync dry run
+
+The `Sync` Source compares each TAK Mission with its CalTopo Map and logs what it
+would create, update, adopt or delete in CalTopo - nothing is written yet.
+
+CloudTAK's Mission routes only accept a user's token, so Missions are read with a
+**Profile API Token of a dedicated service account** (an LDAP account whose groups can
+read the Missions): log in to CloudTAK as that account, then Menu → Settings → API
+Tokens. A password protected Mission also needs the account subscribed to it. Once
+CloudTAK lets a Layer read its own Data Sync Mission, `missionReader()` in `task.ts`
+switches to that and the token goes away.
+
+1. Put the Incoming settings in `.incoming-env.json` (gitignored, it holds credentials):
+
+   ```json
+   {
+       "Source": {
+           "Mode": "Sync",
+           "CredentialId": "<CalTopo service account credential ID>",
+           "CredentialSecret": "<CalTopo service account credential secret>",
+           "MissionToken": "<CloudTAK profile API token>",
+           "Pairs": [{ "MapId": "<CalTopo map ID>", "MissionGuid": "<TAK mission GUID>" }],
+           "DryRun": true
+       },
+       "DEBUG": true
+   }
+   ```
+
+2. Load them into the dev Layer: `scripts/dev-layer.sh`
+3. Run one sync: `npx tsx task.ts`
+
+With `DEBUG` on, each planned action is listed under the pair's summary line.
+
 ## Caution
 
 The dev Layer has no Connection, so anything it submits goes to the dev

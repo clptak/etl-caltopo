@@ -16,6 +16,8 @@
 #   ETL_API      Dev CloudTAK API URL                (default http://localhost:5001)
 #   CLOUDTAK_ENV Dev CloudTAK's JSON api/.env        (default ~/CloudTAK/api/.env)
 #   LAYER_NAME   Name of the dev Layer               (default "CalTopo Sync (dev)")
+#   INCOMING_ENV JSON file of Incoming settings, ie: a Mission Sync Source (default
+#                .incoming-env.json if present) - keep it out of git, it holds credentials
 #   OUTGOING_ENV JSON file of Outgoing settings, ie: PLI Connect Keys (default .outgoing-env.json
 #                if present) - keep it out of git, Connect Keys are credentials
 #   CONNECTION   Connection ID to move the Layer to - Outgoing Layers only receive the
@@ -30,6 +32,7 @@ DEV_DB="${DEV_DB:-postgres://localhost:5432/tak_ps_etl}"
 ETL_API="${ETL_API:-http://localhost:5001}"
 CLOUDTAK_ENV="${CLOUDTAK_ENV:-$HOME/CloudTAK/api/.env}"
 LAYER_NAME="${LAYER_NAME:-CalTopo Sync (dev)}"
+INCOMING_ENV="${INCOMING_ENV:-.incoming-env.json}"
 OUTGOING_ENV="${OUTGOING_ENV:-.outgoing-env.json}"
 VERSION="$(node -p "require('./package.json').version")"
 
@@ -38,12 +41,23 @@ case "$(node -p "new URL('$ETL_API').hostname")" in
     *) echo "not ok - ETL_API must be a localhost dev CloudTAK" >&2; exit 1 ;;
 esac
 
-# Without a settings file an existing Outgoing environment is left as it is
+# Compact a JSON settings file - without one, the existing environment is left as it is
+compact() {
+    node -e "process.stdout.write(JSON.stringify(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))))" "$1"
+}
+
+SET_INCOMING=false
+INCOMING='{}'
+if [ -f "$INCOMING_ENV" ]; then
+    SET_INCOMING=true
+    INCOMING="$(compact "$INCOMING_ENV")"
+fi
+
 SET_OUTGOING=false
 OUTGOING='{}'
 if [ -f "$OUTGOING_ENV" ]; then
     SET_OUTGOING=true
-    OUTGOING="$(node -e "process.stdout.write(JSON.stringify(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))))" "$OUTGOING_ENV")"
+    OUTGOING="$(compact "$OUTGOING_ENV")"
 fi
 
 CONNECTION="${CONNECTION:-}"
@@ -53,6 +67,7 @@ FILTERS='{"queries":[{"name":"Positions only","query":"$substring(properties.typ
 
 LAYER_ID="$(psql "$DEV_DB" -v ON_ERROR_STOP=1 -Atq \
     -v name="$LAYER_NAME" -v version="$VERSION" \
+    -v incoming="$INCOMING" -v set_incoming="$SET_INCOMING" \
     -v outgoing="$OUTGOING" -v set_outgoing="$SET_OUTGOING" \
     -v connection="$CONNECTION" -v filters="$FILTERS" <<'SQL'
 INSERT INTO integrations (prefix, name, repo)
@@ -67,9 +82,11 @@ INSERT INTO layers (name, description, connection, task, version)
 UPDATE layers SET connection = NULLIF(:'connection', '')::integer, updated = now()
     WHERE name = :'name' AND :'connection' <> '' AND connection IS DISTINCT FROM NULLIF(:'connection', '')::integer;
 
-INSERT INTO layers_incoming (layer, cron)
-    SELECT id, 'rate(1 minute)' FROM layers WHERE name = :'name'
-    ON CONFLICT (layer) DO NOTHING;
+INSERT INTO layers_incoming (layer, cron, environment)
+    SELECT id, 'rate(1 minute)', :'incoming'::jsonb FROM layers WHERE name = :'name'
+    ON CONFLICT (layer) DO UPDATE SET
+        environment = CASE WHEN :'set_incoming' = 'true' THEN EXCLUDED.environment ELSE layers_incoming.environment END,
+        updated = now();
 
 INSERT INTO layers_outgoing (layer, subscriptions, environment, filters)
     SELECT id, ARRAY['feature:*'], :'outgoing'::jsonb, :'filters'::jsonb FROM layers WHERE name = :'name'
@@ -102,5 +119,6 @@ fs.writeFileSync('.env', JSON.stringify({
 JS
 
 echo "ok - Layer $LAYER_ID ($LAYER_NAME) registered in $DEV_DB - Connection: $LAYER_CONNECTION"
+if [ "$SET_INCOMING" = true ]; then echo "ok - Incoming settings loaded from $INCOMING_ENV"; fi
 if [ "$SET_OUTGOING" = true ]; then echo "ok - Outgoing settings loaded from $OUTGOING_ENV"; fi
 echo "ok - wrote .env - run the ETL with: npx tsx task.ts"

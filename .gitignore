@@ -105,3 +105,5 @@ dist
 
 # Local Outgoing settings for scripts/dev-layer.sh - holds Connect Keys
 .outgoing-env.json
+# Local Incoming settings for scripts/dev-layer.sh - holds credentials
+.incoming-env.json
