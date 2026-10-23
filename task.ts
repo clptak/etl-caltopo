@@ -8,7 +8,7 @@ import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, M
 import { PLIConfig, positionReport } from './lib/pli.js';
 import { ProfileTokenReader } from './lib/mission.js';
 import type { MissionReader } from './lib/mission.js';
-import { planTakToCalTopo, summary } from './lib/sync.js';
+import { planTakToCalTopo, summary, describe } from './lib/sync.js';
 import type { SyncState } from './lib/sync.js';
 
 const MapSource = Type.Object({
@@ -379,32 +379,28 @@ export default class Task extends ETL {
 
             try {
                 // Both sides are read even when one fails, so one run reports every broken credential
-                const [missionRead, mapRead] = await Promise.allSettled([
+                const [missionRead, foldersRead, mapRead] = await Promise.allSettled([
                     reader.features(pair.MissionGuid),
+                    reader.folders(pair.MissionGuid),
                     caltopo.teamMap(pair.MapId, source),
                 ]);
 
-                const failures = [missionRead, mapRead]
+                const failures = [missionRead, foldersRead, mapRead]
                     .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
                     .map((r) => r.reason instanceof Error ? r.reason.message : String(r.reason));
                 if (failures.length) throw new Error(failures.join(' | '));
 
                 const mission = (missionRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['features']>>>).value;
+                const folders = (foldersRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['folders']>>>).value;
                 const map = (mapRead as PromiseFulfilledResult<Awaited<ReturnType<CalTopo['teamMap']>>>).value;
 
-                const plan = planTakToCalTopo(mission, map, state);
+                const plan = planTakToCalTopo(mission, map, state, folders);
 
                 console.log(`ok - dry run ${pair.MissionGuid} -> ${pair.MapId}: ${mission.length} Mission items, ${map.length} CalTopo objects, ${state.links.length} linked - ${summary(plan)}`);
                 for (const warning of plan.warnings) console.log(`warn - ${warning}`);
 
                 if (verbose) {
-                    for (const action of plan.actions) {
-                        const detail = action.op === 'skip' ? action.reason
-                            : action.op === 'adopt' ? (action.same ? 'same content' : 'content differs')
-                                : action.op === 'update' && action.conflict ? 'conflict - also changed in CalTopo'
-                                    : '';
-                        console.log(`  ${action.op} - ${action.title || '<untitled>'} (${action.op === 'skip' ? action.id : action.tak})${detail ? `: ${detail}` : ''}`);
-                    }
+                    for (const action of plan.actions) console.log(`  ${describe(action)}`);
                 }
             } catch (err) {
                 // One broken pair must not stop the others

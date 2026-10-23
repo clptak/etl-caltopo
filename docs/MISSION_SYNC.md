@@ -17,10 +17,32 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | Mission read (`lib/mission.ts`) | Service account Profile API Token |
 | Signed CalTopo Team Map read | Done |
 | TAK → CalTopo plan (create / update / adopt / delete, empty Mission guard) | Done, dry run only |
+| Folder placement - TAK folder → CalTopo Folder of the same name, `Assignments` folder → CalTopo Assignment class | Done, dry run only |
 | Writes to existing CalTopo Maps | Not started |
 | Saving links in the Layer's ephemeral store | Not started |
 | Icon & style translation from the Node-RED engine | Not started |
 | Locking against overlapping runs | Not started |
+
+## Placement rules
+
+- An item in a TAK Mission folder goes in a CalTopo Folder with the same title (matched
+  regardless of case, created when the Map does not have one) - ie: `Segments`,
+  `Search Area`, `LPB Search-Hiker - AZ`
+- Lines & polygons in the `Assignments` folder become CalTopo **Assignment** objects
+  (`number` from the callsign, `status: DRAFT`) rather than objects in a Folder
+- A Point in `Assignments` (ie: the IPP) can not be an Assignment, so it becomes a top
+  level Marker - logged as a warning
+- Items outside any folder stay at the top level of the Map
+
+## Decisions
+
+| Date | Decision | Why / follow up |
+| ---- | -------- | --------------- |
+| 2026-10-23 | CalTopo → TAK uses CloudTAK's Data Sync with Mission Diff; this ETL only does TAK → CalTopo | Data Sync already writes and removes Mission items - no need to rebuild it |
+| 2026-10-23 | Missions are read with a dedicated service account's Profile API Token | CloudTAK's Mission routes reject Layer tokens. Temporary - replaced by the Layer scoped read below |
+| 2026-10-23 | TAK folders map to CalTopo Folders of the same name; the `Assignments` folder maps to the CalTopo Assignment class | Matches how segments, assignments & probability rings are organised in TAK |
+| 2026-10-23 | A Point in the `Assignments` folder (ie: the IPP) becomes a top level Marker | CalTopo Assignments must be lines or polygons |
+| 2026-10-23 | An Assignment's `number` is the full TAK callsign, ie: `ASSIGNMENT 01` | Kept as is for now - **may want to trim it later** to the team's numbering (ie: `01`) in `toCalTopo()` |
 
 ## Planned CloudTAK change - Layer scoped Mission reads
 
@@ -30,7 +52,8 @@ renewed by logging it in again.
 
 The replacement lets a Layer token read **only the Mission its own Data Sync points at**:
 
-1. In CloudTAK `GET /api/marti/missions/:guid/cot`, also accept a Layer resource token
+1. In CloudTAK `GET /api/marti/missions/:guid/cot` **and** `GET /api/marti/missions/:guid/layer`
+   (the sync reads the Mission folders for placement), also accept a Layer resource token
    (`AuthResourceAccess.LAYER`) - today `MissionControl.context()` calls `Auth.as_user()`,
    which rejects every resource token.
 2. For a Layer token, load the Layer's `incoming.data` Data Sync and refuse (403) unless

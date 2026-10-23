@@ -18,6 +18,34 @@ const MissionFeatures = Type.Object({
     features: Type.Array(MissionFeature),
 });
 
+/** A Mission folder (TAK Mission Layer) - folders nest and list the UIDs of the items in them */
+type MissionLayer = {
+    name: string;
+    uids?: Array<{ data: string }>;
+    mission_layers?: MissionLayer[];
+};
+
+const MissionLayers = Type.Object({
+    data: Type.Array(Type.Unsafe<MissionLayer>(Type.Object({
+        name: Type.String(),
+    }, { additionalProperties: true }))),
+});
+
+/** Map each item UID to the name of the innermost Mission folder it is in */
+export function folderNames(layers: MissionLayer[]): Map<string, string> {
+    const folders = new Map<string, string>();
+
+    const walk = (list: MissionLayer[]) => {
+        for (const layer of list) {
+            for (const uid of layer.uids ?? []) folders.set(uid.data, layer.name);
+            walk(layer.mission_layers ?? []);
+        }
+    };
+
+    walk(layers);
+    return folders;
+}
+
 /**
  * Reads the current contents of a TAK Mission
  *
@@ -26,6 +54,9 @@ const MissionFeatures = Type.Object({
  */
 export interface MissionReader {
     features(guid: string): Promise<MissionFeature[]>;
+
+    /** The Mission folder name of each item UID - items outside a folder are absent */
+    folders(guid: string): Promise<Map<string, string>>;
 }
 
 /**
@@ -44,7 +75,15 @@ export class ProfileTokenReader implements MissionReader {
     }
 
     async features(guid: string): Promise<MissionFeature[]> {
-        const url = new URL(`/api/marti/missions/${encodeURIComponent(guid)}/cot`, this.api);
+        return (await (await this.get(guid, 'cot')).typed(MissionFeatures)).features;
+    }
+
+    async folders(guid: string): Promise<Map<string, string>> {
+        return folderNames((await (await this.get(guid, 'layer')).typed(MissionLayers)).data);
+    }
+
+    async get(guid: string, resource: 'cot' | 'layer') {
+        const url = new URL(`/api/marti/missions/${encodeURIComponent(guid)}/${resource}`, this.api);
 
         const res = await fetch(url, {
             headers: { Authorization: `Bearer ${this.token}` },
@@ -53,9 +92,9 @@ export class ProfileTokenReader implements MissionReader {
 
         if (!res.ok) {
             const body = await res.text().catch(() => '');
-            throw new Error(`CloudTAK responded with HTTP ${res.status} reading Mission ${guid}${body ? `: ${body.trim().slice(0, 500)}` : ''}`);
+            throw new Error(`CloudTAK responded with HTTP ${res.status} reading Mission ${guid} ${resource}${body ? `: ${body.trim().slice(0, 500)}` : ''}`);
         }
 
-        return (await res.typed(MissionFeatures)).features;
+        return res;
     }
 }

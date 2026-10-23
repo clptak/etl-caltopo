@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary } from '../lib/sync.js';
+import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe } from '../lib/sync.js';
+import { folderNames } from '../lib/mission.js';
 import type { Link } from '../lib/sync.js';
 import type { MissionFeature } from '../lib/mission.js';
 
@@ -118,4 +119,54 @@ test('toCalTopo - Points become Markers, lines & polygons Shapes with their styl
         class: 'Shape', title: 'Segment A', description: '',
         stroke: '#FF0000', 'stroke-width': 3, 'stroke-opacity': 1, fill: '#FF0000', 'fill-opacity': 0.1,
     });
+});
+
+test('folderNames - items map to their innermost Mission folder', () => {
+    const folders = folderNames([
+        { name: 'Segments', uids: [{ data: 's-1' }], mission_layers: [{ name: 'Night', uids: [{ data: 's-2' }] }] },
+        { name: 'Assignments', uids: [{ data: 'a-1' }] },
+    ]);
+
+    assert.deepEqual([...folders], [['s-1', 'Segments'], ['s-2', 'Night'], ['a-1', 'Assignments']]);
+});
+
+test('planTakToCalTopo - TAK folders become CalTopo Folders, Assignments become the Assignment class', () => {
+    const line = tak('a-1', 'ASSIGNMENT 01', { type: 'LineString', coordinates: [[-111.6, 35.1], [-111.7, 35.2]], props: { stroke: '#FF0000' } });
+    const ipp = tak('a-2', 'IPP');
+    const segment = tak('s-1', '01', { type: 'Polygon', coordinates: [[[-111.6, 35.1], [-111.7, 35.1], [-111.7, 35.2], [-111.6, 35.1]]] });
+    const ring = tak('r-1', '50% Search-Hiker AZ', { type: 'Polygon', coordinates: [[[-111.6, 35.1], [-111.7, 35.1], [-111.7, 35.2], [-111.6, 35.1]]] });
+
+    const folders = new Map([['a-1', 'Assignments'], ['a-2', 'Assignments'], ['s-1', 'Segments'], ['r-1', 'LPB Search-Hiker - AZ']]);
+    // The Map already has a "segments" Folder, matched regardless of case
+    const map = [{ id: 'f-1', properties: { class: 'Folder', title: 'segments' } }];
+
+    const plan = planTakToCalTopo([line, ipp, segment, ring], map, { links: [] }, folders);
+
+    assert.deepEqual(plan.actions.map(describe), [
+        'folder - LPB Search-Hiker - AZ',
+        'create - ASSIGNMENT 01 (a-1) as Assignment',
+        'create - IPP (a-2) as Marker',
+        'create - 01 (s-1) as Shape in Segments',
+        'create - 50% Search-Hiker AZ (r-1) as Shape in LPB Search-Hiker - AZ',
+    ]);
+    assert.deepEqual(plan.warnings, ['IPP is a Point in the Assignments folder - CalTopo Assignments are lines or polygons, so it becomes a top level Marker']);
+
+    const assignment = plan.actions[1];
+    assert.ok(assignment.op === 'create');
+    assert.deepEqual(assignment.caltopo.properties, { class: 'Assignment', number: 'ASSIGNMENT 01', status: 'DRAFT', description: '', stroke: '#FF0000' });
+    assert.equal(assignment.caltopo.folder, undefined);
+});
+
+test('planTakToCalTopo - a TAK item moved to another folder is an update', () => {
+    const segment = tak('s-1', '01');
+    const object = { id: 'c-1', properties: { class: 'Marker', title: '01', description: '', folderId: 'f-1' }, geometry: { type: 'Point', coordinates: [-111.65, 35.19] } };
+    const folderObject = { id: 'f-1', properties: { class: 'Folder', title: 'Segments' } };
+    const titles = new Map([['f-1', 'Segments']]);
+
+    const linked = { tak: 's-1', caltopo: 'c-1', origin: 'tak' as const, takHash: hash(canonicalTak(segment, 'Segments')), caltopoHash: hash(canonicalCalTopo(object, titles)) };
+
+    assert.deepEqual(planTakToCalTopo([segment], [object, folderObject], { links: [linked] }, new Map([['s-1', 'Segments']])).actions, []);
+
+    const moved = planTakToCalTopo([segment], [object, folderObject], { links: [linked] }, new Map([['s-1', 'Search Area']]));
+    assert.deepEqual(moved.actions.map(describe), ['folder - Search Area', 'update - 01 (s-1) as Marker in Search Area']);
 });

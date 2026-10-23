@@ -23,25 +23,34 @@ export type SyncState = {
     links: Link[];
 };
 
-/** The content compared across both sides - geometry, title & description */
+/** The content compared across both sides - geometry, title, description & folder */
 export type Canonical = {
     geometry: { type: string; coordinates: unknown };
     title: string;
     description: string;
+    folder: string;
 };
 
-/** A CalTopo object as the sync would write it */
+/**
+ * A CalTopo object as the sync would write it - folder is the CalTopo Folder's title,
+ * resolved to a folderId when written
+ */
 export type CalTopoWrite = {
     type: 'Feature';
     geometry: { type: string; coordinates: unknown };
     properties: Record<string, unknown>;
+    folder?: string;
 };
+
+/** Items in a TAK Mission folder of this name become CalTopo Assignments instead of a Folder */
+export const ASSIGNMENTS = 'Assignments';
 
 export type Action =
     | { op: 'create'; tak: string; title: string; caltopo: CalTopoWrite }
     | { op: 'update'; tak: string; caltopo: string; title: string; conflict: boolean; write: CalTopoWrite }
     | { op: 'adopt'; tak: string; caltopo: string; title: string; same: boolean }
     | { op: 'delete'; tak: string; caltopo: string; title: string }
+    | { op: 'folder'; title: string }
     | { op: 'skip'; id: string; title: string; reason: string };
 
 export type Plan = {
@@ -65,19 +74,44 @@ function text(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
 }
 
-export function canonicalTak(feature: MissionFeature): Canonical {
+function isAssignments(folder: string | undefined): boolean {
+    return !!folder && folder.trim().toLowerCase() === ASSIGNMENTS.toLowerCase();
+}
+
+/** Lines & polygons in the TAK Assignments folder become CalTopo Assignments */
+export function isAssignment(feature: MissionFeature, folder: string | undefined): boolean {
+    return isAssignments(folder) && feature.geometry.type !== 'Point';
+}
+
+/**
+ * The CalTopo Folder a TAK item goes in - its TAK folder's name, except Assignments which
+ * are a CalTopo class rather than a Folder. A Point in the Assignments folder can not be an
+ * Assignment, so it stays at the top level of the Map
+ */
+export function calTopoFolder(feature: MissionFeature, folder: string | undefined): string {
+    if (!folder || isAssignments(folder)) return '';
+    return folder.trim();
+}
+
+export function canonicalTak(feature: MissionFeature, folder?: string): Canonical {
     return {
         geometry: { type: feature.geometry.type, coordinates: round(feature.geometry.coordinates) },
         title: text(feature.properties.callsign),
         description: text(feature.properties.remarks),
+        folder: isAssignment(feature, folder) ? ASSIGNMENTS : calTopoFolder(feature, folder),
     };
 }
 
-export function canonicalCalTopo(feature: CalTopoFeature): Canonical {
+/** folderTitles maps CalTopo Folder IDs to their titles */
+export function canonicalCalTopo(feature: CalTopoFeature, folderTitles: Map<string, string> = new Map()): Canonical {
+    const props = feature.properties as Record<string, unknown>;
+    const assignment = props.class === 'Assignment';
+
     return {
         geometry: { type: feature.geometry?.type, coordinates: round(feature.geometry?.coordinates) },
-        title: text(feature.properties.title),
-        description: text(feature.properties.description),
+        title: assignment ? text(props.number) || text(props.title) : text(props.title),
+        description: text(props.description),
+        folder: assignment ? ASSIGNMENTS : folderTitles.get(String(props.folderId ?? '')) ?? '',
     };
 }
 
@@ -86,15 +120,21 @@ export function hash(canonical: Canonical): string {
 }
 
 /**
- * A TAK item as a CalTopo Marker or Shape - icon translation is not done yet, so Markers
- * keep CalTopo's default symbol
+ * A TAK item as a CalTopo Marker, Shape or Assignment - icon translation is not done yet,
+ * so Markers keep CalTopo's default symbol. An Assignment is numbered after its callsign and
+ * starts as a DRAFT
  */
-export function toCalTopo(feature: MissionFeature): CalTopoWrite {
-    const canonical = canonicalTak(feature);
+export function toCalTopo(feature: MissionFeature, folder?: string): CalTopoWrite {
+    const canonical = canonicalTak(feature, folder);
     const props = feature.properties;
     const color = (value: unknown) => typeof value === 'string' ? value.replace(/^#/, '') : undefined;
 
-    const properties: Record<string, unknown> = {
+    const properties: Record<string, unknown> = isAssignment(feature, folder) ? {
+        class: 'Assignment',
+        number: canonical.title,
+        status: 'DRAFT',
+        description: canonical.description,
+    } : {
         class: canonical.geometry.type === 'Point' ? 'Marker' : 'Shape',
         title: canonical.title,
         description: canonical.description,
@@ -112,7 +152,10 @@ export function toCalTopo(feature: MissionFeature): CalTopoWrite {
         }
     }
 
-    return { type: 'Feature', geometry: canonical.geometry, properties };
+    const write: CalTopoWrite = { type: 'Feature', geometry: canonical.geometry, properties };
+    if (canonical.folder && canonical.folder !== ASSIGNMENTS) write.folder = canonical.folder;
+
+    return write;
 }
 
 /** Why a Mission item is never synced to CalTopo, or undefined if it is */
@@ -136,14 +179,24 @@ export function unsupported(feature: MissionFeature): string | undefined {
  * - linked items removed from the Mission are deleted from CalTopo, unless the Mission came
  *   back empty, which is more likely a failed read than a cleared Mission
  *
+ * - CalTopo Folders named after the TAK folders are created when the Map does not have one
+ *
  * Items deleted in CalTopo but still in the Mission are left to the CalTopo → TAK half
+ *
+ * folders maps TAK item UIDs to the name of the Mission folder they are in
  */
-export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[], state: SyncState): Plan {
+export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[], state: SyncState, folders: Map<string, string> = new Map()): Plan {
     const actions: Action[] = [];
     const warnings: string[] = [];
 
     const objects = new Map(caltopo.map((f) => [f.id, f]));
     const links = new Map(state.links.map((l) => [l.tak, l]));
+
+    const folderTitles = new Map(caltopo
+        .filter((f) => f.properties.class === 'Folder')
+        .map((f) => [f.id, text(f.properties.title)]));
+    const existingFolders = new Set([...folderTitles.values()].map((t) => t.toLowerCase()));
+    const newFolders = new Set<string>();
 
     const synced: MissionFeature[] = [];
     for (const feature of tak) {
@@ -156,8 +209,17 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
     }
 
     for (const feature of synced) {
-        const canonical = canonicalTak(feature);
+        const folder = folders.get(feature.id);
+        const canonical = canonicalTak(feature, folder);
         const link = links.get(feature.id);
+
+        if (canonical.folder && canonical.folder !== ASSIGNMENTS && !existingFolders.has(canonical.folder.toLowerCase())) {
+            newFolders.add(canonical.folder);
+        }
+
+        if (isAssignments(folder) && feature.geometry.type === 'Point') {
+            warnings.push(`${canonical.title || feature.id} is a Point in the ${ASSIGNMENTS} folder - CalTopo Assignments are lines or polygons, so it becomes a top level Marker`);
+        }
 
         if (link) {
             const object = objects.get(link.caltopo);
@@ -173,8 +235,8 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
                 tak: feature.id,
                 caltopo: link.caltopo,
                 title: canonical.title,
-                conflict: hash(canonicalCalTopo(object)) !== link.caltopoHash,
-                write: toCalTopo(feature),
+                conflict: hash(canonicalCalTopo(object, folderTitles)) !== link.caltopoHash,
+                write: toCalTopo(feature, folder),
             });
         } else if (objects.has(feature.id)) {
             actions.push({
@@ -182,12 +244,15 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
                 tak: feature.id,
                 caltopo: feature.id,
                 title: canonical.title,
-                same: hash(canonical) === hash(canonicalCalTopo(objects.get(feature.id)!)),
+                same: hash(canonical) === hash(canonicalCalTopo(objects.get(feature.id)!, folderTitles)),
             });
         } else {
-            actions.push({ op: 'create', tak: feature.id, title: canonical.title, caltopo: toCalTopo(feature) });
+            actions.push({ op: 'create', tak: feature.id, title: canonical.title, caltopo: toCalTopo(feature, folder) });
         }
     }
+
+    // Folders first, as the objects created in them need their IDs
+    actions.unshift(...[...newFolders].map((title): Action => ({ op: 'folder', title })));
 
     const present = new Set(tak.map((f) => f.id));
     const removed = state.links.filter((l) => !present.has(l.tak) && objects.has(l.caltopo));
@@ -216,7 +281,7 @@ export function summary(plan: Plan): string {
     const differ = plan.actions.filter((a) => a.op === 'adopt' && !a.same).length;
     const conflicts = plan.actions.filter((a) => a.op === 'update' && a.conflict).length;
 
-    const parts = ['create', 'update', 'adopt', 'delete', 'skip'].filter((op) => counts.get(op)).map((op) => {
+    const parts = ['folder', 'create', 'update', 'adopt', 'delete', 'skip'].filter((op) => counts.get(op)).map((op) => {
         let part = `${op} ${counts.get(op)}`;
         if (op === 'adopt' && differ) part += ` (${differ} differ)`;
         if (op === 'update' && conflicts) part += ` (${conflicts} conflict)`;
@@ -224,4 +289,21 @@ export function summary(plan: Plan): string {
     });
 
     return parts.length ? parts.join(', ') : 'no changes';
+}
+
+/** Where a written object goes, ie: "Shape in Segments" or "Assignment" */
+function placement(write: CalTopoWrite): string {
+    return `${write.properties.class}${write.folder ? ` in ${write.folder}` : ''}`;
+}
+
+/** One log line for an action */
+export function describe(action: Action): string {
+    switch (action.op) {
+        case 'folder': return `folder - ${action.title}`;
+        case 'create': return `create - ${action.title || '<untitled>'} (${action.tak}) as ${placement(action.caltopo)}`;
+        case 'update': return `update - ${action.title || '<untitled>'} (${action.tak}) as ${placement(action.write)}${action.conflict ? ': conflict - also changed in CalTopo' : ''}`;
+        case 'adopt': return `adopt - ${action.title || '<untitled>'} (${action.tak}): ${action.same ? 'same content' : 'content differs'}`;
+        case 'delete': return `delete - ${action.title || '<untitled>'} (${action.tak})`;
+        case 'skip': return `skip - ${action.title || '<untitled>'} (${action.id}): ${action.reason}`;
+    }
 }

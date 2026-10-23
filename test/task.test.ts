@@ -490,6 +490,7 @@ test('control - Sync source dry runs each pair with signed map reads and never s
 
         const read: string[] = [];
         task.missionReader = () => ({
+            folders: async () => new Map([['tak-1', 'Segments']]),
             features: async (guid: string) => {
                 read.push(guid);
                 return [
@@ -507,8 +508,9 @@ test('control - Sync source dry runs each pair with signed map reads and never s
         assert.deepEqual(read, ['mission-1']);
         assert.deepEqual(api.requests.map((r) => r.pathname), ['/api/v1/map/MAP1/since/0']);
         assert.equal(submitted, false);
-        assert.ok(logs.some((l) => l.includes('dry run mission-1 -> MAP1: 2 Mission items, 2 CalTopo objects, 0 linked - create 1, adopt 1')));
-        assert.ok(logs.some((l) => l.includes('create - Staging (tak-1)')));
+        assert.ok(logs.some((l) => l.includes('dry run mission-1 -> MAP1: 2 Mission items, 2 CalTopo objects, 0 linked - folder 1, create 1, adopt 1')));
+        assert.ok(logs.some((l) => l.includes('folder - Segments')));
+        assert.ok(logs.some((l) => l.includes('create - Staging (tak-1) as Marker in Segments')));
     } finally {
         console.log = log;
         await api.close();
