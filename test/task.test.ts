@@ -106,6 +106,9 @@ test('fromMap - folders become paths, markers styled, geometry-less objects drop
     assert.equal(marker.properties.archived, true);
     assert.deepEqual(marker.geometry.coordinates, [-105, 39, 0]);
 
+    // No marker-symbol - a plain TAK point
+    assert.equal(marker.properties.icon, undefined);
+
     assert.equal(line.path, undefined);
     assert.equal(line.properties.stroke, '#00FF00');
     assert.equal(line.properties['stroke-width'], 3);
@@ -665,4 +668,19 @@ test('control - Sync sends CalTopo objects to the Layer Data Sync, never what it
     } finally {
         await api.close();
     }
+});
+
+test('fromMap - a mapped CalTopo marker symbol becomes its TAK iconset icon & CoT type', async () => {
+    const task = await Task.init();
+
+    const [cp, plain] = task.fromMap([
+        { id: 'cp-1', type: 'Feature', properties: { title: 'ICP', class: 'Marker', creator: 'x', updated: 1, 'marker-symbol': 'cp' }, geometry: { type: 'Point', coordinates: [-111.6, 35.1] } },
+        { id: 'p-1', type: 'Feature', properties: { title: 'Spot', class: 'Marker', creator: 'x', updated: 1, 'marker-symbol': 'not-mapped' }, geometry: { type: 'Point', coordinates: [-111.6, 35.1] } },
+    ]);
+
+    assert.equal(cp.properties.type, 'a-f-G');
+    assert.match(String(cp.properties.icon), /\/WildFire\/Incident Command Post\.png$/);
+
+    assert.equal(plain.properties.type, 'u-d-p');
+    assert.equal(plain.properties.icon, undefined);
 });

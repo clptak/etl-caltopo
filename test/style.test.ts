@@ -94,3 +94,28 @@ test('toCalTopo - a pattern or fill the TAK item dropped is cleared in CalTopo',
     const line = toCalTopo({ id: 'l', properties: { callsign: 'Trail', stroke: '#FF0000', 'stroke-style': 'solid' }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1], [-111.7, 35.2]] } });
     assert.deepEqual([line.properties.pattern, line.properties.fill, line.properties['fill-opacity']], [null, null, null]);
 });
+
+test('IconIndex.tak - a CalTopo symbol becomes its iconset icon & CoT type, or only the CoT type', () => {
+    assert.deepEqual(INDEX.tak('helibase'), { icon: 'wildfire/WildFire/Helibase.png', type: 'a-f-G' });
+    assert.deepEqual(INDEX.tak('custom-friendly'), { type: 'a-f-G' });
+    assert.deepEqual(INDEX.tak('point'), { type: 'u-d-p' });
+    assert.equal(INDEX.tak('not-mapped'), undefined);
+    assert.equal(INDEX.tak(undefined), undefined);
+
+    // The first mapping using a symbol wins, as in Node-RED
+    const index = new IconIndex([
+        { iconLabel: 'cp', cotType: 'a-f-G', iconName: 'ICP.png', iconsetUid: 'first', iconsetFolder: 'A' },
+        { iconLabel: 'cp', cotType: 'a-f-G', iconName: 'ICP.png', iconsetUid: 'second', iconsetFolder: 'B' },
+    ]);
+    assert.equal(index.tak('cp')?.icon, 'first/A/ICP.png');
+});
+
+test('IconIndex - an iconset symbol survives the round trip CalTopo → TAK → CalTopo', () => {
+    const index = new IconIndex(icons);
+
+    for (const symbol of ['cp', 'helibase', 'logs-staging']) {
+        const tak = index.tak(symbol);
+        assert.ok(tak?.icon, `${symbol} maps to an iconset icon`);
+        assert.equal(index.symbol(tak.icon, tak.type), symbol);
+    }
+});

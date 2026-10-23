@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, MapMode, MapSharing, LOCATION_TTL } from './lib/caltopo.js';
 import { PLIConfig, positionReport } from './lib/pli.js';
 import { ProfileTokenReader } from './lib/mission.js';
+import { ICONS } from './lib/style.js';
 import type { MissionReader } from './lib/mission.js';
 import { planTakToCalTopo, summary, describe, nextLinks, calTopoToTak } from './lib/sync.js';
 import type { SyncState, Plan, Action, CalTopoWrite } from './lib/sync.js';
@@ -616,7 +617,6 @@ export default class Task extends ETL {
                 if (metadata.stroke !== undefined) feat.properties.stroke = String(metadata.stroke);
                 if (metadata['stroke-opacity'] !== undefined) feat.properties['stroke-opacity'] = Number(metadata['stroke-opacity']);
                 if (metadata['stroke-width'] !== undefined) feat.properties['stroke-width'] = Number(metadata['stroke-width']);
-                if (metadata.ico !== undefined) feat.properties.icon = String(metadata.icon);
 
                 // CalTopo returns points with 4+ coords
                 coordEach(feat.geometry, (coord) => {
@@ -626,6 +626,11 @@ export default class Task extends ETL {
                 feat.properties.archived = true;
                 if (feat.geometry.type === 'Point') {
                     feat.properties.type = 'u-d-p';
+
+                    // The CalTopo symbol as the TAK iconset icon / CoT type it is mapped to
+                    const icon = ICONS.tak(metadata['marker-symbol']);
+                    if (icon?.type) feat.properties.type = icon.type;
+                    if (icon?.icon) feat.properties.icon = icon.icon;
 
                     if (metadata['marker-color']) {
                         feat.properties['marker-color'] = `#${metadata['marker-color']}`;

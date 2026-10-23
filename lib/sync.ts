@@ -2,11 +2,8 @@ import { createHash } from 'node:crypto';
 import type { Static } from '@sinclair/typebox';
 import type { TeamMapFeature } from './caltopo.js';
 import type { MissionFeature } from './mission.js';
-import { IconIndex } from './style.js';
-import icons from './icons.js';
-
-/** The icon-configs mappings shared by every sync */
-const ICONS = new IconIndex(icons);
+import { ICONS } from './style.js';
+import type { IconIndex } from './style.js';
 
 type CalTopoFeature = Static<typeof TeamMapFeature>;
 
