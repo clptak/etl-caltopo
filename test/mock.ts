@@ -10,6 +10,7 @@ export const CREDS = {
 export type Request = {
     method: string;
     pathname: string;
+    query: Record<string, string>;
     json: Record<string, unknown> | null;
 };
 
@@ -28,7 +29,8 @@ function signed(method: string, pathname: string, params: URLSearchParams): bool
 }
 
 /**
- * Minimal CalTopo API - signed Shared Locations & Team Map creation endpoints and a public map endpoint
+ * Minimal CalTopo API - signed Shared Locations & Team Map creation endpoints, a public map endpoint
+ * and the Trackable Device position report endpoint, which rejects the Connect Key BADKEY
  */
 export async function mock(opts: {
     locations?: unknown[];
@@ -50,7 +52,7 @@ export async function mock(opts: {
 
         const raw = params.get('json');
         const json = raw ? JSON.parse(raw) : null;
-        state.requests.push({ method, pathname: url.pathname, json });
+        state.requests.push({ method, pathname: url.pathname, query: Object.fromEntries(url.searchParams), json });
 
         const send = (code: number, body: unknown) => {
             res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -94,6 +96,14 @@ export async function mock(opts: {
                 timestamp: Date.now(),
                 result: { features: opts.locations ?? [] }
             });
+        }
+
+        const position = url.pathname.match(/^\/api\/v1\/position\/report\/([^/]+)$/);
+        if (method === 'GET' && position) {
+            if (position[1] === 'BADKEY') return send(401, { status: 'error', message: 'unknown connect key' });
+
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            return res.end('OK');
         }
 
         const map = url.pathname.match(/^\/api\/v1\/map\/([^/]+)\/since\/-500$/);

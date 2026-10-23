@@ -16,6 +16,8 @@
 #   ETL_API      Dev CloudTAK API URL                (default http://localhost:5001)
 #   CLOUDTAK_ENV Dev CloudTAK's JSON api/.env        (default ~/CloudTAK/api/.env)
 #   LAYER_NAME   Name of the dev Layer               (default "CalTopo Sync (dev)")
+#   OUTGOING_ENV JSON file of Outgoing settings, ie: PLI Connect Keys (default .outgoing-env.json
+#                if present) - keep it out of git, Connect Keys are credentials
 
 set -euo pipefail
 
@@ -25,6 +27,7 @@ DEV_DB="${DEV_DB:-postgres://localhost:5432/tak_ps_etl}"
 ETL_API="${ETL_API:-http://localhost:5001}"
 CLOUDTAK_ENV="${CLOUDTAK_ENV:-$HOME/CloudTAK/api/.env}"
 LAYER_NAME="${LAYER_NAME:-CalTopo Sync (dev)}"
+OUTGOING_ENV="${OUTGOING_ENV:-.outgoing-env.json}"
 VERSION="$(node -p "require('./package.json').version")"
 
 case "$(node -p "new URL('$ETL_API').hostname")" in
@@ -32,8 +35,17 @@ case "$(node -p "new URL('$ETL_API').hostname")" in
     *) echo "not ok - ETL_API must be a localhost dev CloudTAK" >&2; exit 1 ;;
 esac
 
+# Without a settings file an existing Outgoing environment is left as it is
+SET_OUTGOING=false
+OUTGOING='{}'
+if [ -f "$OUTGOING_ENV" ]; then
+    SET_OUTGOING=true
+    OUTGOING="$(node -e "process.stdout.write(JSON.stringify(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))))" "$OUTGOING_ENV")"
+fi
+
 LAYER_ID="$(psql "$DEV_DB" -v ON_ERROR_STOP=1 -Atq \
-    -v name="$LAYER_NAME" -v version="$VERSION" <<'SQL'
+    -v name="$LAYER_NAME" -v version="$VERSION" \
+    -v outgoing="$OUTGOING" -v set_outgoing="$SET_OUTGOING" <<'SQL'
 INSERT INTO integrations (prefix, name, repo)
     VALUES ('etl-caltopo', 'CalTopo', 'https://github.com/clptak/etl-caltopo')
     ON CONFLICT (prefix) DO NOTHING;
@@ -46,6 +58,11 @@ INSERT INTO layers (name, description, connection, task, version)
 INSERT INTO layers_incoming (layer, cron)
     SELECT id, 'rate(1 minute)' FROM layers WHERE name = :'name' AND connection IS NULL
     ON CONFLICT (layer) DO NOTHING;
+
+INSERT INTO layers_outgoing (layer, subscriptions, environment)
+    SELECT id, ARRAY['feature:*'], :'outgoing'::jsonb FROM layers WHERE name = :'name' AND connection IS NULL
+    ON CONFLICT (layer) DO UPDATE SET environment = EXCLUDED.environment, updated = now()
+    WHERE :'set_outgoing' = 'true';
 
 SELECT id FROM layers WHERE name = :'name' AND connection IS NULL;
 SQL
@@ -69,4 +86,5 @@ fs.writeFileSync('.env', JSON.stringify({
 JS
 
 echo "ok - Layer $LAYER_ID ($LAYER_NAME) registered in $DEV_DB"
+if [ "$SET_OUTGOING" = true ]; then echo "ok - Outgoing settings loaded from $OUTGOING_ENV"; fi
 echo "ok - wrote .env - run the ETL with: npx tsx task.ts"

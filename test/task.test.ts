@@ -238,8 +238,8 @@ test('Outgoing schema - Team Account, credentials & map defaults', async () => {
     const task = await Task.init();
     const schema = await task.schema(SchemaType.Input, DataFlowType.Outgoing);
 
-    assert.deepEqual(Object.keys(schema.properties), ['AccountId', 'TeamId', 'CredentialId', 'CredentialSecret', 'MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'DEBUG']);
-    assert.deepEqual(schema.required, ['AccountId', 'TeamId', 'CredentialId', 'CredentialSecret', 'MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'DEBUG']);
+    assert.deepEqual(Object.keys(schema.properties), ['AccountId', 'TeamId', 'CredentialId', 'CredentialSecret', 'MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'PLI', 'DEBUG']);
+    assert.deepEqual(schema.required, ['MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'DEBUG']);
     assert.equal(schema.properties.MapMode.default, 'sar');
     assert.deepEqual(schema.properties.MapMode.enum, ['sar', 'cal']);
     assert.equal(schema.properties.MapSharing.default, 'SECRET');
@@ -361,6 +361,98 @@ test('outgoing - an unreadable Event fails before a Map is created, a failed rec
         const res = await outgoing(api.base, OUTGOING, [CREATE], { current: {}, patch: false });
         assert.equal(api.requests.length, 1);
         assert.deepEqual(res.fetched.map((f) => f.method), ['GET', 'PATCH']);
+    } finally {
+        await api.close();
+    }
+});
+
+/** A TAK client position as streamed to a feature:* subscribed Layer */
+function position(callsign: string, props: Record<string, unknown> = {}) {
+    return {
+        type: 'feature',
+        xml: '<event/>',
+        geojson: {
+            id: `ANDROID-${callsign}`,
+            type: 'Feature',
+            path: '/',
+            properties: {
+                callsign,
+                type: 'a-f-G-U-C',
+                how: 'm-g',
+                time: new Date().toISOString(),
+                start: new Date().toISOString(),
+                stale: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+                center: [-105.6, 40.3],
+                status: { battery: '88' },
+                ...props
+            },
+            geometry: { type: 'Point', coordinates: [-105.6, 40.3, 2900] }
+        }
+    };
+}
+
+const PLI = {
+    ConnectKeys: [
+        { Name: 'Volunteers', ConnectKey: 'KEY-VOL', CallsignContains: ['CCSO-SAR'] },
+        { Name: 'Sworn', ConnectKey: 'KEY-SWORN', CallsignContains: ['MCSO'] }
+    ],
+    Types: ['a-f-G'],
+    DevicesOnly: true
+};
+
+test('Outgoing schema - a PLI only Layer needs no Team Account settings', async () => {
+    const task = await Task.init();
+    const schema = await task.schema(SchemaType.Input, DataFlowType.Outgoing);
+
+    assert.ok(schema.properties.PLI);
+    assert.deepEqual(schema.properties.PLI.properties.Types.default, ['a-f-G']);
+    assert.equal(schema.properties.PLI.properties.DevicesOnly.default, true);
+    assert.ok(!schema.required.includes('PLI'));
+});
+
+test('outgoing - feature positions are reported to the Connect Key of the matching rule', async () => {
+    const api = await mock();
+
+    try {
+        const res = await outgoing(api.base, { PLI, DEBUG: false, MapMode: 'sar', MapSharing: 'SECRET', MapLayers: [{ layer: 'mbt' }], MarkerColor: 'FF0000' }, [
+            position('CCSO-SAR 12'),
+            position('MCSO Deputy 4'),
+            position('Civilian 1'),
+            position('CCSO-SAR Marker', { type: 'a-h-G' })
+        ]);
+
+        assert.deepEqual(api.requests.map((r) => [r.pathname, r.query]), [
+            ['/api/v1/position/report/KEY-VOL', { id: 'CCSO-SAR 12', lat: '40.3', lng: '-105.6' }],
+            ['/api/v1/position/report/KEY-SWORN', { id: 'MCSO Deputy 4', lat: '40.3', lng: '-105.6' }]
+        ]);
+        assert.equal(res.fetched.length, 0);
+    } finally {
+        await api.close();
+    }
+});
+
+test('outgoing - a rejected position is logged and never fails the batch', async () => {
+    const api = await mock();
+
+    try {
+        const pli = { ...PLI, ConnectKeys: [{ Name: 'Broken', ConnectKey: 'BADKEY', CallsignContains: [] }] };
+        await outgoing(api.base, { ...OUTGOING, PLI: pli }, [position('CCSO-SAR 12'), position('CCSO-SAR 13')]);
+
+        assert.equal(api.requests.length, 2);
+    } finally {
+        await api.close();
+    }
+});
+
+test('outgoing - event:create without Team Account settings fails before any request', async () => {
+    const api = await mock();
+
+    try {
+        await assert.rejects(
+            outgoing(api.base, { PLI, MapMode: 'sar', MapSharing: 'SECRET', MapLayers: [{ layer: 'mbt' }], MarkerColor: 'FF0000', DEBUG: false }, [CREATE], { current: {} }),
+            /event:create requires the AccountId, TeamId, CredentialId & CredentialSecret/
+        );
+        assert.equal(api.requests.length, 0);
     } finally {
         await api.close();
     }

@@ -42,6 +42,33 @@ With no Layer environment set, a run fetches the Layer and then stops with an
 Set the environment from the Layer's page in the CloudTAK UI (server-level Layers
 are listed under Server Admin → Layers).
 
+## Testing PLI forwarding
+
+The live `feature:*` stream reaches a Layer through AWS SQS, so locally a position is
+sent straight to the Outgoing handler instead:
+
+1. Put the Outgoing settings in `.outgoing-env.json` (gitignored, Connect Keys are
+   credentials) - see the README's PLI table, ie:
+
+   ```json
+   {
+       "PLI": {
+           "ConnectKeys": [
+               { "Name": "Volunteers", "ConnectKey": "<volunteer key>", "CallsignContains": ["CCSO-SAR"] },
+               { "Name": "Sworn", "ConnectKey": "<sworn key>", "CallsignContains": ["MCSO"] }
+           ]
+       },
+       "DEBUG": true
+   }
+   ```
+
+2. Load them into the dev Layer: `scripts/dev-layer.sh`
+3. Send a position: `npx tsx scripts/dev-position.ts "CCSO-SAR Test" 40.3 -105.6`
+
+With a real Connect Key the device appears under the Team's Trackable Devices in CalTopo.
+Callsigns that match no rule, or a non-friendly type passed as the 4th argument (ie:
+`a-h-G`), are logged as skipped when `DEBUG` is on.
+
 ## Caution
 
 The dev Layer has no Connection, so anything it submits goes to the dev

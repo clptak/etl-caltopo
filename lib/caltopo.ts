@@ -227,6 +227,25 @@ export default class CalTopo {
     }
 
     /**
+     * Report the position of a Trackable Device - the Connect Key is the only credential
+     */
+    async positionReport(connectKey: string, id: string, lat: number, lng: number): Promise<void> {
+        const url = new URL(`/api/v1/position/report/${encodeURIComponent(connectKey)}`, this.url);
+        url.searchParams.set('id', id);
+        url.searchParams.set('lat', String(lat));
+        url.searchParams.set('lng', String(lng));
+
+        // The Connect Key is a credential, so only the device is logged
+        if (this.verbose) console.log(`ok - reporting position of ${id}`);
+
+        const res = await fetch(url, { safeUrlAllow: [this.url.origin] });
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            throw new Error(`CalTopo responded with HTTP ${res.status}${body ? `: ${body.trim().slice(0, 500)}` : ''}`);
+        }
+    }
+
+    /**
      * Create a Collaborative Map in a Team Account, returning the new Map ID
      * Signed POST requests carry the signature parameters and json payload as a form encoded body
      * The service account requires at least UPDATE permission

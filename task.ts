@@ -1,10 +1,11 @@
 import { Type, TSchema, Static } from '@sinclair/typebox';
 import type Lambda from 'aws-lambda';
 import { Feature } from '@tak-ps/node-cot';
-import type { Event } from '@tak-ps/etl';
+import type { Event, OutgoingFeatureMessage } from '@tak-ps/etl';
 import ETL, { SchemaType, handler as internal, local, DataFlowType, InvocationType, OutgoingMessageType, OutgoingAction } from '@tak-ps/etl';
 import { coordEach } from '@turf/meta';
 import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, MapMode, MapSharing, LOCATION_TTL } from './lib/caltopo.js';
+import { PLIConfig, positionReport } from './lib/pli.js';
 
 const MapSource = Type.Object({
     Mode: Type.Literal('Map'),
@@ -46,16 +47,17 @@ const LegacyEnv = Type.Object({
     'DEBUG': Type.Boolean({ default: false })
 });
 
+// The Team Account fields are only required by event:create, so a PLI only Layer can leave them blank
 const OutgoingEnv = Type.Composite([
-    Type.Object({
+    Type.Partial(Type.Object({
         AccountId: Type.String({
-            description: 'CalTopo Service Account ID the credentials belong to',
+            description: 'CalTopo Service Account ID the credentials belong to - required by event:create',
         }),
         TeamId: Type.String({
-            description: 'CalTopo Team ID the Maps are created in - from the Team admin page URL https://caltopo.com/group/{TeamId}/admin/details - the Service Account must have at least Update permissions on the Team',
+            description: 'CalTopo Team ID the Maps are created in - from the Team admin page URL https://caltopo.com/group/{TeamId}/admin/details - the Service Account must have at least Update permissions on the Team - required by event:create',
         }),
-    }),
-    Credentials,
+    })),
+    Type.Partial(Credentials),
     Type.Object({
         // Declared with enum rather than Type.Enum so the Layer environment UI renders a select
         MapMode: Type.Unsafe<MapMode>(Type.String({
@@ -78,13 +80,14 @@ const OutgoingEnv = Type.Composite([
             default: 'FF0000',
             description: 'Hex colour (without #) of the Marker placed at the CoreEvent location'
         }),
+        PLI: Type.Optional(PLIConfig),
         'DEBUG': Type.Boolean({
             default: false,
             description: 'Print results in logs'
         })
     })
 ], {
-    description: 'Creates a CalTopo Map in the Team Account for every CoreEvent created - the Map ID is filed under the caltopo external ID of the Event, which requires the event:read & event:update permissions'
+    description: 'event:create - creates a CalTopo Map in the Team Account for every CoreEvent created, the Map ID is filed under the caltopo external ID of the Event, which requires the event:read & event:update permissions. feature:* - forwards TAK positions to CalTopo Trackable Devices when PLI is configured'
 });
 
 /** The CoreEvent external ID system the created Map ID is filed under */
@@ -133,6 +136,9 @@ export default class Task extends ETL {
     }
 
     /**
+     * feature:* - a streamed TAK position is forwarded to the CalTopo Connect Key of the
+     * first PLI rule its callsign matches
+     *
      * event:create - a created CoreEvent becomes a new CalTopo Map in the Team Account
      * with a Marker at the Event location carrying its callsign, remarks & location
      *
@@ -144,10 +150,15 @@ export default class Task extends ETL {
         const caltopo = this.client(env.DEBUG);
 
         for (const message of Task.outgoingMessages(event)) {
-            if (message.type !== OutgoingMessageType.Event || message.action !== OutgoingAction.Create) {
+            if (message.type === OutgoingMessageType.Feature) {
+                await this.forwardPosition(caltopo, message, env);
+                continue;
+            } else if (message.type !== OutgoingMessageType.Event || message.action !== OutgoingAction.Create) {
                 if (env.DEBUG) console.log(`ok - skip - ${message.type}:${'action' in message ? message.action : '*'} is not an event:create`);
                 continue;
             }
+
+            const team = Task.teamAccount(env);
 
             // The message is a snapshot from creation time - read the Event back so a redelivery sees the Map ID
             const core = await this.coreEvent(this.type(CoreEvent, message.data).id);
@@ -161,13 +172,48 @@ export default class Task extends ETL {
             const map = this.mapFromEvent(core, env);
             if (env.DEBUG) console.log(`ok - creating map "${map.properties.title}" for event ${core.id}`);
 
-            const id = await caltopo.createMap(env.TeamId, env, map);
+            const id = await caltopo.createMap(team.TeamId, team, map);
             console.log(`ok - created map ${id} for event ${core.id}`);
 
             await this.record(core, id, caltopo.mapUrl(id), env.MapSharing);
         }
 
         return true;
+    }
+
+    /**
+     * Forward a streamed TAK position to CalTopo. A failure is logged rather than thrown - a
+     * retried position is already out of date and failures would only fill the dead letter queue
+     */
+    async forwardPosition(caltopo: CalTopo, message: Static<typeof OutgoingFeatureMessage>, env: OutgoingEnv): Promise<void> {
+        if (!env.PLI) {
+            if (env.DEBUG) console.log(`ok - skip - feature ${message.geojson.id} as PLI is not configured`);
+            return;
+        }
+
+        const report = positionReport(message, env.PLI);
+        if ('skip' in report) {
+            if (env.DEBUG) console.log(`ok - skip - feature ${message.geojson.id}: ${report.skip}`);
+            return;
+        }
+
+        try {
+            await caltopo.positionReport(report.rule.ConnectKey, report.id, report.lat, report.lng);
+            if (env.DEBUG) console.log(`ok - forwarded ${report.id} to ${report.rule.Name}`);
+        } catch (err) {
+            console.error(`not ok - failed to forward ${report.id} to ${report.rule.Name}:`, err instanceof Error ? err.message : String(err));
+        }
+    }
+
+    /** The Team Account settings event:create needs - optional in the schema for PLI only Layers */
+    static teamAccount(env: OutgoingEnv): { TeamId: string, CredentialId: string, CredentialSecret: string } {
+        const { AccountId, TeamId, CredentialId, CredentialSecret } = env;
+
+        if (!AccountId || !TeamId || !CredentialId || !CredentialSecret) {
+            throw new Error('event:create requires the AccountId, TeamId, CredentialId & CredentialSecret Outgoing settings');
+        }
+
+        return { TeamId, CredentialId, CredentialSecret };
     }
 
     /** The current state of a CoreEvent - the Layer needs the event:read permission */
