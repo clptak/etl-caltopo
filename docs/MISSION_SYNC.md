@@ -53,6 +53,7 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | 2026-10-23 | TAK `stroke-style` dashed / dotted map to the CalTopo `pattern` strings in `PATTERNS` (`lib/sync.ts`) | Read from lines styled in the CalTopo UI - CalTopo does not document them. Dotted uses the tick style picked on the 75% ring rather than CalTopo's round dots, so dashed & dotted currently look the same - **may want a distinct dashed style later**. Outlined has no CalTopo equivalent and becomes solid |
 | 2026-10-23 | A TAK Polygon without a visible fill (ie: probability rings) is written as a closed LineString | CalTopo colours a pattern's dots with the fill, so a transparent fill hid dotted rings. Dotted lines get an opaque fill |
 | 2026-10-23 | Shapes always send `pattern`, `fill` & `fill-opacity`, as `null` when unused | CalTopo merges an edit into the object, so a dropped property would otherwise linger |
+| 2026-10-23 | CalTopo marker symbols map back to TAK through the same icon-configs mappings (first mapping using a symbol wins) | Icons need the matching iconset - WildFire UID `83198b48…` - installed in every CloudTAK & TAK client, or they show a fallback for the CoT type |
 | 2026-10-23 | The TAK remark `None` is treated as no description | TAK clients send it for an item without remarks |
 | 2026-10-23 | The CalTopo service account needs UPDATE on a team Map it can see | A Map it can only read (ie: shared by link) rejects every write with `400 Error saving object` - edit links do not apply to the API |
 
