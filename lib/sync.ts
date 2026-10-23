@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Static } from '@sinclair/typebox';
 import type { TeamMapFeature } from './caltopo.js';
 import type { MissionFeature } from './mission.js';
+import { IconIndex } from './style.js';
+import icons from './icons.js';
+
+/** The icon-configs mappings shared by every sync */
+const ICONS = new IconIndex(icons);
 
 type CalTopoFeature = Static<typeof TeamMapFeature>;
 
@@ -23,12 +28,13 @@ export type SyncState = {
     links: Link[];
 };
 
-/** The content compared across both sides - geometry, title, description & folder */
+/** The content compared across both sides - geometry, title, description, folder & styling */
 export type Canonical = {
     geometry: { type: string; coordinates: unknown };
     title: string;
     description: string;
     folder: string;
+    style: Record<string, unknown>;
 };
 
 /**
@@ -98,12 +104,85 @@ export function calTopoFolder(feature: MissionFeature, folder: string | undefine
     return folder.trim();
 }
 
+/**
+ * CalTopo line patterns - SVG path, spacing & fill flag - read from lines styled in the CalTopo
+ * UI. TAK dotted rings use the short tick pattern the team picked on the 75% ring rather than
+ * CalTopo's round dots, so dashed and dotted currently look the same. A solid line has no
+ * pattern; TAK's outlined style has no CalTopo equivalent
+ */
+export const PATTERNS: Record<string, string> = {
+    dashed: 'M0 -1 L0 1,,8,F',
+    dotted: 'M0 -1 L0 1,,8,F',
+};
+
+/**
+ * The geometry a TAK item is written to CalTopo with - a Polygon without a visible fill (ie:
+ * a probability ring) becomes its closed outer ring as a LineString, as CalTopo colours a
+ * pattern's dots with the fill and a transparent fill hides them
+ */
+export function calTopoGeometry(feature: MissionFeature): { type: string; coordinates: unknown } {
+    const { type, coordinates } = feature.geometry;
+    const opacity = feature.properties['fill-opacity'];
+    const filled = typeof feature.properties.fill === 'string' && (typeof opacity !== 'number' || opacity > 0);
+
+    if (type === 'Polygon' && !filled && Array.isArray(coordinates) && Array.isArray(coordinates[0])) {
+        return { type: 'LineString', coordinates: round(coordinates[0]) };
+    }
+
+    return { type, coordinates: round(coordinates) };
+}
+
+/**
+ * The CalTopo styling of a TAK item - the marker symbol & colour of a Point, the line of a
+ * LineString and the line & fill of a filled Polygon. Keys are CalTopo's, in a fixed order so the
+ * same style always hashes the same
+ */
+export function calTopoStyle(feature: MissionFeature, icons: IconIndex = ICONS): Record<string, unknown> {
+    const props = feature.properties;
+    const style: Record<string, unknown> = {};
+
+    const hex = (value: unknown) => typeof value === 'string' && /^#?[0-9a-f]{6}$/i.test(value) ? value.replace(/^#?/, '#').toUpperCase() : undefined;
+    const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+
+    const geometry = calTopoGeometry(feature);
+
+    if (geometry.type === 'Point') {
+        style['marker-symbol'] = icons.symbol(props.icon, props.type);
+        // CalTopo marker colours carry no #
+        style['marker-color'] = hex(props['marker-color'])?.slice(1);
+    } else {
+        style.stroke = hex(props.stroke);
+        style['stroke-width'] = number(props['stroke-width']);
+        style['stroke-opacity'] = number(props['stroke-opacity']);
+        style.pattern = typeof props['stroke-style'] === 'string' ? PATTERNS[props['stroke-style']] : undefined;
+
+        if (geometry.type === 'Polygon') {
+            style.fill = hex(props.fill);
+            style['fill-opacity'] = number(props['fill-opacity']);
+        } else if (props['stroke-style'] === 'dotted') {
+            // The fill of a CalTopo line colours its dots, so it must be opaque
+            style.fill = style.stroke;
+            style['fill-opacity'] = 1;
+        }
+    }
+
+    for (const key of Object.keys(style)) if (style[key] === undefined) delete style[key];
+    return style;
+}
+
+/** TAK clients send the remark "None" for an item without remarks */
+function remarks(value: unknown): string {
+    const remark = text(value);
+    return remark === 'None' ? '' : remark;
+}
+
 export function canonicalTak(feature: MissionFeature, folder?: string): Canonical {
     return {
-        geometry: { type: feature.geometry.type, coordinates: round(feature.geometry.coordinates) },
+        geometry: calTopoGeometry(feature),
         title: text(feature.properties.callsign),
-        description: text(feature.properties.remarks),
+        description: remarks(feature.properties.remarks),
         folder: isAssignment(feature, folder) ? ASSIGNMENTS : calTopoFolder(feature, folder),
+        style: calTopoStyle(feature),
     };
 }
 
@@ -112,11 +191,22 @@ export function canonicalCalTopo(feature: CalTopoFeature, folderTitles: Map<stri
     const props = feature.properties as Record<string, unknown>;
     const assignment = props.class === 'Assignment';
 
+    // The same keys calTopoStyle() writes for this geometry, read back from the object
+    const keys = feature.geometry?.type === 'Point' ? ['marker-symbol', 'marker-color']
+        : feature.geometry?.type === 'Polygon' ? ['stroke', 'stroke-width', 'stroke-opacity', 'pattern', 'fill', 'fill-opacity']
+            : ['stroke', 'stroke-width', 'stroke-opacity', 'pattern', 'fill', 'fill-opacity'];
+    const style: Record<string, unknown> = {};
+    for (const key of keys) {
+        const value = typeof props[key] === 'string' && ['stroke', 'fill'].includes(key) ? String(props[key]).toUpperCase() : props[key];
+        if (value !== undefined && value !== null) style[key] = value;
+    }
+
     return {
         geometry: { type: feature.geometry?.type, coordinates: round(feature.geometry?.coordinates) },
         title: assignment ? text(props.number) || text(props.title) : text(props.title),
-        description: text(props.description),
+        description: remarks(props.description),
         folder: assignment ? ASSIGNMENTS : folderTitles.get(String(props.folderId ?? '')) ?? '',
+        style,
     };
 }
 
@@ -125,14 +215,11 @@ export function hash(canonical: Canonical): string {
 }
 
 /**
- * A TAK item as a CalTopo Marker, Shape or Assignment - icon translation is not done yet,
- * so Markers keep CalTopo's default symbol. An Assignment is numbered after its callsign and
- * starts as a DRAFT
+ * A TAK item as a CalTopo Marker, Shape or Assignment with its symbol & styling. An
+ * Assignment is numbered after its callsign and starts as a DRAFT
  */
 export function toCalTopo(feature: MissionFeature, folder?: string): CalTopoWrite {
     const canonical = canonicalTak(feature, folder);
-    const props = feature.properties;
-    const color = (value: unknown) => typeof value === 'string' ? value.replace(/^#/, '') : undefined;
 
     const properties: Record<string, unknown> = isAssignment(feature, folder) ? {
         class: 'Assignment',
@@ -145,15 +232,13 @@ export function toCalTopo(feature: MissionFeature, folder?: string): CalTopoWrit
         description: canonical.description,
     };
 
-    if (canonical.geometry.type === 'Point') {
-        if (color(props['marker-color'])) properties['marker-color'] = color(props['marker-color']);
-    } else {
-        if (color(props.stroke)) properties.stroke = `#${color(props.stroke)}`;
-        if (typeof props['stroke-width'] === 'number') properties['stroke-width'] = props['stroke-width'];
-        if (typeof props['stroke-opacity'] === 'number') properties['stroke-opacity'] = props['stroke-opacity'];
-        if (canonical.geometry.type === 'Polygon') {
-            if (color(props.fill)) properties.fill = `#${color(props.fill)}`;
-            if (typeof props['fill-opacity'] === 'number') properties['fill-opacity'] = props['fill-opacity'];
+    Object.assign(properties, canonical.style);
+
+    // CalTopo merges an edit into the object, so a pattern or fill the item no longer has is
+    // cleared explicitly rather than left behind
+    if (canonical.geometry.type !== 'Point') {
+        for (const key of ['pattern', 'fill', 'fill-opacity']) {
+            if (!(key in properties)) properties[key] = null;
         }
     }
 

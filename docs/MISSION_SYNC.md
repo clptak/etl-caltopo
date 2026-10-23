@@ -22,7 +22,7 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | Saving links in the Layer's ephemeral store | Done - a second run of an unchanged Mission writes nothing |
 | Locking against overlapping runs (`sync:lock`, honoured for 5 minutes) | Done |
 | Deleting from CalTopo (`DELETE /api/v1/map/{map}/{type}/{id}`, signed like a GET) | Done, verified on a real Map |
-| Icon & style translation from the Node-RED engine | Not started |
+| Icon & style translation - marker symbols, line & fill colour / width / opacity, dashed & dotted lines | Done, verified on a real Map |
 
 ## Placement rules
 
@@ -45,6 +45,11 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | 2026-10-23 | A Point in the `Assignments` folder (ie: the IPP) becomes a top level Marker | CalTopo Assignments must be lines or polygons |
 | 2026-10-23 | An Assignment's `number` is the full TAK callsign, ie: `ASSIGNMENT 01` | Kept as is for now - **may want to trim it later** to the team's numbering (ie: `01`) in `toCalTopo()` |
 | 2026-10-23 | Objects are saved under their TAK UID with `POST /api/v1/map/{map}/{type}/{id}` | CalTopo documents that path as edit, but it also creates (as the Node-RED engine relied on) and keeps the ID - a lost link then finds its object instead of duplicating it |
+| 2026-10-23 | Marker symbols come from the Node-RED `icon-configs.json`, copied into `lib/icons.ts` | Same mappings (and the team's custom CalTopo icons) as Node-RED. Agency specific - regenerate the file when icons change, and keep it out of an upstream PR |
+| 2026-10-23 | TAK `stroke-style` dashed / dotted map to the CalTopo `pattern` strings in `PATTERNS` (`lib/sync.ts`) | Read from lines styled in the CalTopo UI - CalTopo does not document them. Dotted uses the tick style picked on the 75% ring rather than CalTopo's round dots, so dashed & dotted currently look the same - **may want a distinct dashed style later**. Outlined has no CalTopo equivalent and becomes solid |
+| 2026-10-23 | A TAK Polygon without a visible fill (ie: probability rings) is written as a closed LineString | CalTopo colours a pattern's dots with the fill, so a transparent fill hid dotted rings. Dotted lines get an opaque fill |
+| 2026-10-23 | Shapes always send `pattern`, `fill` & `fill-opacity`, as `null` when unused | CalTopo merges an edit into the object, so a dropped property would otherwise linger |
+| 2026-10-23 | The TAK remark `None` is treated as no description | TAK clients send it for an item without remarks |
 | 2026-10-23 | The CalTopo service account needs UPDATE on a team Map it can see | A Map it can only read (ie: shared by link) rejects every write with `400 Error saving object` - edit links do not apply to the API |
 
 ## Planned CloudTAK change - Layer scoped Mission reads

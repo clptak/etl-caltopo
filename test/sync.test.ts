@@ -13,10 +13,11 @@ function tak(id: string, callsign: string, opts: { coordinates?: unknown, type?:
     };
 }
 
+// A CalTopo Marker as the sync writes a TAK u-d-p point - u-d-p maps to the point symbol
 function caltopo(id: string, title: string, opts: { coordinates?: unknown, type?: string, description?: string } = {}) {
     return {
         id,
-        properties: { class: 'Marker', title, description: opts.description ?? '' },
+        properties: { class: 'Marker', title, description: opts.description ?? '', 'marker-symbol': 'point' },
         geometry: { type: opts.type ?? 'Point', coordinates: opts.coordinates ?? [-111.65, 35.19] },
     };
 }
@@ -107,7 +108,7 @@ test('toCalTopo - Points become Markers, lines & polygons Shapes with their styl
     assert.deepEqual(toCalTopo(tak('p', 'LZ', { remarks: 'Helispot', props: { 'marker-color': '#00FF00' } })), {
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [-111.65, 35.19] },
-        properties: { class: 'Marker', title: 'LZ', description: 'Helispot', 'marker-color': '00FF00' },
+        properties: { class: 'Marker', title: 'LZ', description: 'Helispot', 'marker-symbol': 'point', 'marker-color': '00FF00' },
     });
 
     const polygon = toCalTopo(tak('s', 'Segment A', {
@@ -117,7 +118,7 @@ test('toCalTopo - Points become Markers, lines & polygons Shapes with their styl
     }));
     assert.deepEqual(polygon.properties, {
         class: 'Shape', title: 'Segment A', description: '',
-        stroke: '#FF0000', 'stroke-width': 3, 'stroke-opacity': 1, fill: '#FF0000', 'fill-opacity': 0.1,
+        stroke: '#FF0000', 'stroke-width': 3, 'stroke-opacity': 1, fill: '#FF0000', 'fill-opacity': 0.1, pattern: null,
     });
 });
 
@@ -153,7 +154,7 @@ test('planTakToCalTopo - TAK folders become CalTopo Folders, Assignments become 
 
     const assignment = plan.actions[1];
     assert.ok(assignment.op === 'create');
-    assert.deepEqual(assignment.caltopo.properties, { class: 'Assignment', number: 'ASSIGNMENT 01', status: 'DRAFT', description: '', stroke: '#FF0000' });
+    assert.deepEqual(assignment.caltopo.properties, { class: 'Assignment', number: 'ASSIGNMENT 01', status: 'DRAFT', description: '', stroke: '#FF0000', pattern: null, fill: null, 'fill-opacity': null });
     assert.equal(assignment.caltopo.folder, undefined);
 });
 
