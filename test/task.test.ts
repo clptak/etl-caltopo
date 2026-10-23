@@ -516,3 +516,124 @@ test('control - Sync source dry runs each pair with signed map reads and never s
         await api.close();
     }
 });
+
+/**
+ * Run a writing Mission Sync against the mock CalTopo, carrying the Layer's ephemeral store
+ * between runs like CloudTAK does
+ */
+async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1') {
+    const task = await Task.init();
+    const layer = {
+        id: 1,
+        connection: 1,
+        task: 'etl-caltopo-v5.16.1',
+        incoming: {
+            environment: { Source: { Mode: 'Sync', ...CREDS, MissionToken: 'etl.profile', Pairs: [{ MapId: mapId, MissionGuid: 'mission-1' }], DryRun: false }, DEBUG: false },
+            ephemeral
+        }
+    };
+
+    // @ts-expect-error partial layer for testing
+    task.fetchLayer = async () => layer;
+    // @ts-expect-error private in base
+    task.layer = layer;
+    task.client = (verbose: boolean) => new CalTopo({ url: base, verbose });
+    task.missionReader = () => ({ folders: async () => folders, features: async () => mission as never });
+
+    const saved: Record<string, unknown>[] = [];
+    task.setEphemeral = async (ephem: Record<string, unknown>) => { saved.push(structuredClone(ephem)); };
+
+    await task.control();
+    return saved;
+}
+
+test('control - Sync writes Folders before their objects, saves links & releases the lock', async () => {
+    const api = await mock({ map: [{ id: 'skydio', type: 'Feature', properties: { class: 'Shape', title: 'Skydio Poly' }, geometry: { type: 'Point', coordinates: [-111, 35] } }] });
+
+    const mission = [
+        { id: 'seg-1', properties: { callsign: '01', stroke: '#00FF00' }, geometry: { type: 'Polygon', coordinates: [[[-111.6, 35.1], [-111.7, 35.1], [-111.7, 35.2], [-111.6, 35.1]]] } },
+        { id: 'asg-1', properties: { callsign: 'ASSIGNMENT 01' }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1], [-111.7, 35.2]] } },
+        { id: 'ipp', properties: { callsign: 'IPP' }, geometry: { type: 'Point', coordinates: [-111.65, 35.15] } }
+    ];
+    const folders = new Map([['seg-1', 'Segments'], ['asg-1', 'Assignments'], ['ipp', 'Assignments']]);
+
+    try {
+        const saved = await syncRun(api.base, {}, mission, folders);
+
+        const writes = api.requests.filter((r) => r.method !== 'GET').map((r) => `${r.method} ${r.pathname.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/, '<uuid>')}`);
+        assert.deepEqual(writes, [
+            'POST /api/v1/map/MAP1/Folder/<uuid>',
+            'POST /api/v1/map/MAP1/Shape/seg-1',
+            'POST /api/v1/map/MAP1/Assignment/asg-1',
+            'POST /api/v1/map/MAP1/Marker/ipp'
+        ]);
+
+        const folder = api.requests.find((r) => r.pathname.includes('/Folder/'))!;
+        const segment = api.requests.find((r) => r.pathname.endsWith('/Shape/seg-1'))!;
+        assert.equal((folder.json!.properties as Record<string, unknown>).title, 'Segments');
+        assert.equal((segment.json!.properties as Record<string, unknown>).folderId, folder.pathname.split('/').pop());
+        assert.equal(segment.json!.id, 'seg-1');
+
+        // Lock taken, then links saved with the lock released
+        assert.equal(saved.length, 2);
+        assert.ok(saved[0]['sync:lock']);
+        assert.equal(saved[1]['sync:lock'], undefined);
+        const links = (saved[1]['sync:MAP1:mission-1'] as { links: { tak: string, caltopo: string, origin: string }[] }).links;
+        assert.deepEqual(links.map((l) => [l.tak, l.caltopo, l.origin]), [['seg-1', 'seg-1', 'tak'], ['asg-1', 'asg-1', 'tak'], ['ipp', 'ipp', 'tak']]);
+    } finally {
+        await api.close();
+    }
+});
+
+test('control - a second Sync of an unchanged Mission writes nothing, an edit is one update', async () => {
+    const mission = [{ id: 'seg-1', properties: { callsign: '01' }, geometry: { type: 'Point', coordinates: [-111.6, 35.1] } }];
+    const first = await mock();
+
+    let ephemeral: Record<string, unknown>;
+    try {
+        ephemeral = (await syncRun(first.base, {}, mission, new Map())).pop()!;
+    } finally {
+        await first.close();
+    }
+
+    // CalTopo now has the object the first run created
+    const map = [{ id: 'seg-1', type: 'Feature', properties: { class: 'Marker', title: '01', description: '' }, geometry: { type: 'Point', coordinates: [-111.6, 35.1] } }];
+
+    const second = await mock({ map });
+    try {
+        await syncRun(second.base, ephemeral, mission, new Map());
+        assert.deepEqual(second.requests.filter((r) => r.method !== 'GET'), []);
+    } finally {
+        await second.close();
+    }
+
+    const third = await mock({ map });
+    try {
+        await syncRun(third.base, ephemeral, [{ ...mission[0], properties: { callsign: '01 (moved)' } }], new Map());
+        assert.deepEqual(third.requests.filter((r) => r.method !== 'GET').map((r) => `${r.method} ${r.pathname}`), ['POST /api/v1/map/MAP1/Marker/seg-1']);
+    } finally {
+        await third.close();
+    }
+});
+
+test('control - a held lock skips the run, a failed write is retried next run', async () => {
+    const api = await mock();
+    try {
+        await syncRun(api.base, { 'sync:lock': Date.now() - 1000 }, [{ id: 'x', properties: { callsign: 'X' }, geometry: { type: 'Point', coordinates: [0, 0] } }], new Map());
+        assert.deepEqual(api.requests, []);
+    } finally {
+        await api.close();
+    }
+
+    // A lock older than its TTL is ignored, and the READONLY Map rejects the write - no link
+    // is saved, so the next run creates the object again
+    const readonly = await mock();
+    try {
+        const saved = await syncRun(readonly.base, { 'sync:lock': Date.now() - 10 * 60 * 1000 }, [{ id: 'x', properties: { callsign: 'X' }, geometry: { type: 'Point', coordinates: [0, 0] } }], new Map(), 'READONLY');
+
+        assert.deepEqual(readonly.requests.filter((r) => r.method !== 'GET').map((r) => r.pathname), ['/api/v1/map/READONLY/Marker/x']);
+        assert.deepEqual(saved.pop(), { 'sync:READONLY:mission-1': { links: [] } });
+    } finally {
+        await readonly.close();
+    }
+});

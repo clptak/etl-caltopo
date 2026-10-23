@@ -268,6 +268,50 @@ export default class CalTopo {
     }
 
     /**
+     * Create or replace an object of a Team Map under the given ID - CalTopo accepts client
+     * chosen IDs, so the sync reuses TAK UIDs and a lost link still finds its object.
+     * Signed like createMap(), the Service Account needs at least UPDATE permission on the Map
+     */
+    async saveObject(
+        mapId: string,
+        creds: Static<typeof Credentials>,
+        cls: string,
+        id: string,
+        feature: { type: 'Feature', geometry?: unknown, properties: Record<string, unknown> }
+    ): Promise<void> {
+        const url = new URL(`/api/v1/map/${encodeURIComponent(mapId)}/${encodeURIComponent(cls)}/${encodeURIComponent(id)}`, this.url);
+        const payload = JSON.stringify({ ...feature, id });
+
+        const body = new URLSearchParams(CalTopo.signature('POST', url, creds, payload));
+        body.set('json', payload);
+
+        if (this.verbose) console.log(`ok - requesting POST ${url.pathname}`);
+
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+            safeUrlAllow: [this.url.origin]
+        });
+        await CalTopo.assertBody(res);
+    }
+
+    /**
+     * Delete an object of a Team Map - signed like a GET, with the signature as query parameters
+     */
+    async deleteObject(mapId: string, creds: Static<typeof Credentials>, cls: string, id: string): Promise<void> {
+        const url = CalTopo.sign('DELETE', new URL(`/api/v1/map/${encodeURIComponent(mapId)}/${encodeURIComponent(cls)}/${encodeURIComponent(id)}`, this.url), creds);
+
+        if (this.verbose) console.log(`ok - requesting DELETE ${url.pathname}`);
+
+        const res = await fetch(url, { method: 'DELETE', safeUrlAllow: [this.url.origin] });
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            throw new Error(`CalTopo responded with HTTP ${res.status}${body ? `: ${body.trim().slice(0, 500)}` : ''}`);
+        }
+    }
+
+    /**
      * Report the position of a Trackable Device - the Connect Key is the only credential
      */
     async positionReport(connectKey: string, id: string, lat: number, lng: number): Promise<void> {

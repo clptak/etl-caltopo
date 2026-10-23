@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe } from '../lib/sync.js';
+import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe, nextLinks } from '../lib/sync.js';
 import { folderNames } from '../lib/mission.js';
 import type { Link } from '../lib/sync.js';
 import type { MissionFeature } from '../lib/mission.js';
@@ -73,7 +73,7 @@ test('planTakToCalTopo - items removed from the Mission are deleted from CalTopo
 
     const plan = planTakToCalTopo([kept], objects, { links: [link(kept, objects[0]), link(removed, objects[1])] });
 
-    assert.deepEqual(plan.actions, [{ op: 'delete', tak: 't-2', caltopo: 'c-2', title: 'CP 2' }]);
+    assert.deepEqual(plan.actions, [{ op: 'delete', tak: 't-2', caltopo: 'c-2', title: 'CP 2', class: 'Marker' }]);
     assert.deepEqual(plan.warnings, []);
 });
 
@@ -169,4 +169,36 @@ test('planTakToCalTopo - a TAK item moved to another folder is an update', () =>
 
     const moved = planTakToCalTopo([segment], [object, folderObject], { links: [linked] }, new Map([['s-1', 'Search Area']]));
     assert.deepEqual(moved.actions.map(describe), ['folder - Search Area', 'update - 01 (s-1) as Marker in Search Area']);
+});
+
+test('planTakToCalTopo - adopted objects are never deleted from CalTopo', () => {
+    const t = tak('ct-1', 'From CalTopo');
+    const c = caltopo('ct-1', 'From CalTopo');
+
+    const plan = planTakToCalTopo([tak('other', 'Other')], [c], { links: [link(t, c, 'caltopo')] });
+    assert.deepEqual(plan.actions.map((a) => a.op), ['create']);
+});
+
+test('nextLinks - applied actions become links, failed ones are retried next run', () => {
+    const kept = tak('t-1', 'CP 1');
+    const c = caltopo('c-1', 'CP 1');
+    const state = { links: [link(kept, c), link(tak('gone', 'Gone'), caltopo('c-9', 'Gone'), 'caltopo')] };
+
+    const plan = planTakToCalTopo(
+        [{ ...kept, properties: { ...kept.properties, callsign: 'CP 1 moved' } }, tak('new-1', 'New'), tak('new-2', 'Failed'), tak('ct-1', 'Adopted')],
+        [c, caltopo('ct-1', 'Adopted')],
+        state
+    );
+    // new-2 failed to write
+    const applied = plan.actions.filter((a) => !(a.op === 'create' && a.tak === 'new-2'));
+
+    const links = nextLinks(state, [kept, tak('new-1', 'New'), tak('new-2', 'Failed'), tak('ct-1', 'Adopted')], applied);
+
+    assert.deepEqual(links.map((l) => [l.tak, l.caltopo, l.origin]), [
+        ['t-1', 'c-1', 'tak'],
+        ['new-1', 'new-1', 'tak'],
+        ['ct-1', 'ct-1', 'caltopo'],
+    ]);
+    assert.notEqual(links[0].takHash, state.links[0].takHash);
+    assert.equal(links[1].takHash, links[1].caltopoHash);
 });

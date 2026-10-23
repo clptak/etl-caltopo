@@ -4,12 +4,13 @@ import { Feature } from '@tak-ps/node-cot';
 import type { Event, OutgoingFeatureMessage } from '@tak-ps/etl';
 import ETL, { SchemaType, handler as internal, local, DataFlowType, InvocationType, OutgoingMessageType, OutgoingAction } from '@tak-ps/etl';
 import { coordEach } from '@turf/meta';
+import { randomUUID } from 'node:crypto';
 import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, MapMode, MapSharing, LOCATION_TTL } from './lib/caltopo.js';
 import { PLIConfig, positionReport } from './lib/pli.js';
 import { ProfileTokenReader } from './lib/mission.js';
 import type { MissionReader } from './lib/mission.js';
-import { planTakToCalTopo, summary, describe } from './lib/sync.js';
-import type { SyncState } from './lib/sync.js';
+import { planTakToCalTopo, summary, describe, nextLinks } from './lib/sync.js';
+import type { SyncState, Plan, Action, CalTopoWrite } from './lib/sync.js';
 
 const MapSource = Type.Object({
     Mode: Type.Literal('Map'),
@@ -54,13 +55,17 @@ const SyncSource = Type.Composite([
         }),
         DryRun: Type.Boolean({
             default: true,
-            description: 'Log what would change in CalTopo without writing - only dry runs are supported so far',
+            description: 'Log what would change in CalTopo without writing',
         }),
     })
 ], {
     title: 'Mission Sync',
-    description: 'Syncs TAK Mission items to CalTopo Maps - dry run only',
+    description: 'Syncs TAK Mission items to CalTopo Maps - TAK folders become CalTopo Folders, the Assignments folder becomes CalTopo Assignments',
 });
+
+/** Ephemeral key holding the start time of a writing sync run, and how long it is honoured */
+const SYNC_LOCK = 'sync:lock';
+const SYNC_LOCK_TTL = 5 * 60 * 1000;
 
 const Env = Type.Object({
     Source: Type.Union([MapSource, TeamSource, SyncSource]),
@@ -364,49 +369,128 @@ export default class Task extends ETL {
     }
 
     /**
-     * Plan the TAK → CalTopo half of each Map/Mission pair and log it - nothing is written yet
+     * Sync the TAK → CalTopo half of each Map/Mission pair - or with DryRun only log the plan
+     *
      * The links of a pair are kept in the Layer's ephemeral store under sync:<MapId>:<MissionGuid>
+     * and sync:lock holds the start time of a writing run, so an overlapping run skips
      */
     async sync(caltopo: CalTopo, source: Static<typeof SyncSource>, verbose: boolean): Promise<void> {
-        if (!source.DryRun) throw new Error('Mission Sync only supports DryRun so far');
-
         const reader = this.missionReader(source);
-        const ephemeral = ((await this.fetchLayer()).incoming?.ephemeral ?? {}) as Record<string, unknown>;
+        const ephemeral = { ...((await this.fetchLayer()).incoming?.ephemeral ?? {}) as Record<string, unknown> };
 
-        for (const pair of source.Pairs) {
-            const key = `sync:${pair.MapId}:${pair.MissionGuid}`;
-            const state = (ephemeral[key] as SyncState | undefined) ?? { links: [] };
+        if (!source.DryRun) {
+            const lock = Number(ephemeral[SYNC_LOCK]);
+            if (lock && Date.now() - lock < SYNC_LOCK_TTL) {
+                console.log(`ok - skip - a sync started ${Math.round((Date.now() - lock) / 1000)}s ago is still running`);
+                return;
+            }
 
-            try {
-                // Both sides are read even when one fails, so one run reports every broken credential
-                const [missionRead, foldersRead, mapRead] = await Promise.allSettled([
-                    reader.features(pair.MissionGuid),
-                    reader.folders(pair.MissionGuid),
-                    caltopo.teamMap(pair.MapId, source),
-                ]);
+            await this.setEphemeral({ ...ephemeral, [SYNC_LOCK]: Date.now() }, DataFlowType.Incoming);
+        }
 
-                const failures = [missionRead, foldersRead, mapRead]
-                    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-                    .map((r) => r.reason instanceof Error ? r.reason.message : String(r.reason));
-                if (failures.length) throw new Error(failures.join(' | '));
+        try {
+            for (const pair of source.Pairs) {
+                const key = `sync:${pair.MapId}:${pair.MissionGuid}`;
+                const label = `${source.DryRun ? 'dry run' : 'sync'} ${pair.MissionGuid} -> ${pair.MapId}`;
+                const state = (ephemeral[key] as SyncState | undefined) ?? { links: [] };
 
-                const mission = (missionRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['features']>>>).value;
-                const folders = (foldersRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['folders']>>>).value;
-                const map = (mapRead as PromiseFulfilledResult<Awaited<ReturnType<CalTopo['teamMap']>>>).value;
+                try {
+                    // Every source is read even when one fails, so one run reports every broken credential
+                    const [missionRead, foldersRead, mapRead] = await Promise.allSettled([
+                        reader.features(pair.MissionGuid),
+                        reader.folders(pair.MissionGuid),
+                        caltopo.teamMap(pair.MapId, source),
+                    ]);
 
-                const plan = planTakToCalTopo(mission, map, state, folders);
+                    const failures = [missionRead, foldersRead, mapRead]
+                        .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+                        .map((r) => r.reason instanceof Error ? r.reason.message : String(r.reason));
+                    if (failures.length) throw new Error(failures.join(' | '));
 
-                console.log(`ok - dry run ${pair.MissionGuid} -> ${pair.MapId}: ${mission.length} Mission items, ${map.length} CalTopo objects, ${state.links.length} linked - ${summary(plan)}`);
-                for (const warning of plan.warnings) console.log(`warn - ${warning}`);
+                    const mission = (missionRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['features']>>>).value;
+                    const folders = (foldersRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['folders']>>>).value;
+                    const map = (mapRead as PromiseFulfilledResult<Awaited<ReturnType<CalTopo['teamMap']>>>).value;
 
-                if (verbose) {
-                    for (const action of plan.actions) console.log(`  ${describe(action)}`);
+                    const plan = planTakToCalTopo(mission, map, state, folders);
+
+                    console.log(`ok - ${label}: ${mission.length} Mission items, ${map.length} CalTopo objects, ${state.links.length} linked - ${summary(plan)}`);
+                    for (const warning of plan.warnings) console.log(`warn - ${warning}`);
+
+                    if (source.DryRun) {
+                        if (verbose) for (const action of plan.actions) console.log(`  ${describe(action)}`);
+                        continue;
+                    }
+
+                    const applied = await this.apply(caltopo, source, pair.MapId, map, plan);
+                    ephemeral[key] = { links: nextLinks(state, mission, applied) } satisfies SyncState;
+
+                    const failed = plan.actions.filter((a) => a.op !== 'skip').length - applied.filter((a) => a.op !== 'skip').length;
+                    console.log(`ok - ${label}: applied ${applied.filter((a) => a.op !== 'skip').length}${failed ? `, ${failed} failed - retried next run` : ''}`);
+                } catch (err) {
+                    // One broken pair must not stop the others
+                    console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
                 }
-            } catch (err) {
-                // One broken pair must not stop the others
-                console.error(`not ok - dry run ${pair.MissionGuid} -> ${pair.MapId}:`, err instanceof Error ? err.message : String(err));
+            }
+        } finally {
+            if (!source.DryRun) {
+                delete ephemeral[SYNC_LOCK];
+                await this.setEphemeral(ephemeral, DataFlowType.Incoming);
             }
         }
+    }
+
+    /**
+     * Write a plan to CalTopo, returning the actions that succeeded - one failed write is
+     * logged and the rest carry on. Objects are saved under their TAK UID, Folders first so
+     * the objects created in them can reference their IDs
+     */
+    async apply(caltopo: CalTopo, source: Static<typeof SyncSource>, mapId: string, map: Awaited<ReturnType<CalTopo['teamMap']>>, plan: Plan): Promise<Action[]> {
+        const folderIds = new Map(map
+            .filter((f) => f.properties.class === 'Folder')
+            .map((f) => [String(f.properties.title ?? '').trim().toLowerCase(), f.id]));
+
+        const save = async (id: string, write: CalTopoWrite) => {
+            const properties = { ...write.properties };
+
+            if (write.folder) {
+                const folderId = folderIds.get(write.folder.toLowerCase());
+                if (!folderId) throw new Error(`CalTopo Folder ${write.folder} could not be created`);
+                properties.folderId = folderId;
+            }
+
+            await caltopo.saveObject(mapId, source, String(properties.class), id, { type: 'Feature', geometry: write.geometry, properties });
+        };
+
+        const applied: Action[] = [];
+        for (const action of plan.actions) {
+            try {
+                if (action.op === 'folder') {
+                    const id = randomUUID();
+                    await caltopo.saveObject(mapId, source, 'Folder', id, {
+                        type: 'Feature',
+                        properties: { class: 'Folder', title: action.title, visible: true, labelVisible: true },
+                    });
+                    folderIds.set(action.title.toLowerCase(), id);
+                } else if (action.op === 'create') {
+                    await save(action.tak, action.caltopo);
+                } else if (action.op === 'update') {
+                    // An object keeps its class for life, so a new class means a new object
+                    if (action.from && action.from !== action.write.properties.class) {
+                        await caltopo.deleteObject(mapId, source, action.from, action.caltopo);
+                    }
+                    await save(action.caltopo, action.write);
+                } else if (action.op === 'delete') {
+                    await caltopo.deleteObject(mapId, source, action.class, action.caltopo);
+                }
+
+                applied.push(action);
+                if (action.op !== 'skip' && action.op !== 'adopt') console.log(`ok - ${describe(action)}`);
+            } catch (err) {
+                console.error(`not ok - ${describe(action)}:`, err instanceof Error ? err.message : String(err));
+            }
+        }
+
+        return applied;
     }
 
     /**

@@ -16,12 +16,13 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | ----- | ----- |
 | Mission read (`lib/mission.ts`) | Service account Profile API Token |
 | Signed CalTopo Team Map read | Done |
-| TAK → CalTopo plan (create / update / adopt / delete, empty Mission guard) | Done, dry run only |
-| Folder placement - TAK folder → CalTopo Folder of the same name, `Assignments` folder → CalTopo Assignment class | Done, dry run only |
-| Writes to existing CalTopo Maps | Not started |
-| Saving links in the Layer's ephemeral store | Not started |
+| TAK → CalTopo plan (create / update / adopt / delete, empty Mission guard) | Done |
+| Folder placement - TAK folder → CalTopo Folder of the same name, `Assignments` folder → CalTopo Assignment class | Done |
+| Writes to existing CalTopo Maps - Folders, Markers, Shapes & Assignments saved under their TAK UID | Done, verified on a real Map |
+| Saving links in the Layer's ephemeral store | Done - a second run of an unchanged Mission writes nothing |
+| Locking against overlapping runs (`sync:lock`, honoured for 5 minutes) | Done |
+| Deleting from CalTopo (`DELETE /api/v1/map/{map}/{type}/{id}`, signed like a GET) | Done, verified on a real Map |
 | Icon & style translation from the Node-RED engine | Not started |
-| Locking against overlapping runs | Not started |
 
 ## Placement rules
 
@@ -43,6 +44,8 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | 2026-10-23 | TAK folders map to CalTopo Folders of the same name; the `Assignments` folder maps to the CalTopo Assignment class | Matches how segments, assignments & probability rings are organised in TAK |
 | 2026-10-23 | A Point in the `Assignments` folder (ie: the IPP) becomes a top level Marker | CalTopo Assignments must be lines or polygons |
 | 2026-10-23 | An Assignment's `number` is the full TAK callsign, ie: `ASSIGNMENT 01` | Kept as is for now - **may want to trim it later** to the team's numbering (ie: `01`) in `toCalTopo()` |
+| 2026-10-23 | Objects are saved under their TAK UID with `POST /api/v1/map/{map}/{type}/{id}` | CalTopo documents that path as edit, but it also creates (as the Node-RED engine relied on) and keeps the ID - a lost link then finds its object instead of duplicating it |
+| 2026-10-23 | The CalTopo service account needs UPDATE on a team Map it can see | A Map it can only read (ie: shared by link) rejects every write with `400 Error saving object` - edit links do not apply to the API |
 
 ## Planned CloudTAK change - Layer scoped Mission reads
 

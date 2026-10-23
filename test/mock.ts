@@ -29,7 +29,8 @@ function signed(method: string, pathname: string, params: URLSearchParams): bool
 }
 
 /**
- * Minimal CalTopo API - signed Shared Locations, Team Map read & creation endpoints, a public map endpoint
+ * Minimal CalTopo API - signed Shared Locations, Team Map read, creation & object save / delete
+ * endpoints (the Map READONLY rejects writes), a public map endpoint
  * and the Trackable Device position report endpoint, which rejects the Connect Key BADKEY
  */
 export async function mock(opts: {
@@ -104,6 +105,15 @@ export async function mock(opts: {
 
             res.writeHead(200, { 'Content-Type': 'text/plain' });
             return res.end('OK');
+        }
+
+        const object = url.pathname.match(/^\/api\/v1\/map\/([^/]+)\/([A-Za-z]+)\/([^/]+)$/);
+        if (object && (method === 'POST' || method === 'DELETE')) {
+            const query = method === 'DELETE' ? url.searchParams : params;
+            if (!signed(method, url.pathname, query)) return send(401, { status: 'error', message: 'bad signature' });
+            if (object[1] === 'READONLY') return send(403, { status: 'error', message: 'service account lacks UPDATE permission' });
+
+            return send(200, { status: 'ok', timestamp: Date.now(), result: method === 'POST' ? { ...json, id: object[3] } : {} });
         }
 
         const team = url.pathname.match(/^\/api\/v1\/map\/([^/]+)\/since\/0$/);

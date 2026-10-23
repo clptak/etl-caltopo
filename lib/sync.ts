@@ -45,11 +45,16 @@ export type CalTopoWrite = {
 /** Items in a TAK Mission folder of this name become CalTopo Assignments instead of a Folder */
 export const ASSIGNMENTS = 'Assignments';
 
+/**
+ * takHash / caltopoHash are each side's content hash once the action is applied, so the
+ * links saved afterwards record what was synced. from is the class the CalTopo object has
+ * now, as changing an object's class means deleting it under the old one
+ */
 export type Action =
-    | { op: 'create'; tak: string; title: string; caltopo: CalTopoWrite }
-    | { op: 'update'; tak: string; caltopo: string; title: string; conflict: boolean; write: CalTopoWrite }
-    | { op: 'adopt'; tak: string; caltopo: string; title: string; same: boolean }
-    | { op: 'delete'; tak: string; caltopo: string; title: string }
+    | { op: 'create'; tak: string; title: string; takHash: string; caltopo: CalTopoWrite }
+    | { op: 'update'; tak: string; caltopo: string; title: string; takHash: string; from: string; conflict: boolean; write: CalTopoWrite }
+    | { op: 'adopt'; tak: string; caltopo: string; title: string; takHash: string; caltopoHash: string; same: boolean }
+    | { op: 'delete'; tak: string; caltopo: string; title: string; class: string }
     | { op: 'folder'; title: string }
     | { op: 'skip'; id: string; title: string; reason: string };
 
@@ -235,27 +240,35 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
                 tak: feature.id,
                 caltopo: link.caltopo,
                 title: canonical.title,
+                takHash: hash(canonical),
+                from: String(object.properties.class ?? ''),
                 conflict: hash(canonicalCalTopo(object, folderTitles)) !== link.caltopoHash,
                 write: toCalTopo(feature, folder),
             });
         } else if (objects.has(feature.id)) {
+            const caltopoHash = hash(canonicalCalTopo(objects.get(feature.id)!, folderTitles));
+
             actions.push({
                 op: 'adopt',
                 tak: feature.id,
                 caltopo: feature.id,
                 title: canonical.title,
-                same: hash(canonical) === hash(canonicalCalTopo(objects.get(feature.id)!, folderTitles)),
+                takHash: hash(canonical),
+                caltopoHash,
+                same: hash(canonical) === caltopoHash,
             });
         } else {
-            actions.push({ op: 'create', tak: feature.id, title: canonical.title, caltopo: toCalTopo(feature, folder) });
+            actions.push({ op: 'create', tak: feature.id, title: canonical.title, takHash: hash(canonical), caltopo: toCalTopo(feature, folder) });
         }
     }
 
     // Folders first, as the objects created in them need their IDs
     actions.unshift(...[...newFolders].map((title): Action => ({ op: 'folder', title })));
 
+    // Only objects the sync created are deleted - an adopted object came from CalTopo, and
+    // leaving the Mission (ie: mid Data Sync) is no reason to remove it from CalTopo
     const present = new Set(tak.map((f) => f.id));
-    const removed = state.links.filter((l) => !present.has(l.tak) && objects.has(l.caltopo));
+    const removed = state.links.filter((l) => l.origin === 'tak' && !present.has(l.tak) && objects.has(l.caltopo));
 
     if (removed.length && !synced.length) {
         warnings.push(`Mission returned no items while ${state.links.length} are linked - not deleting ${removed.length} CalTopo objects`);
@@ -266,6 +279,7 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
                 tak: link.tak,
                 caltopo: link.caltopo,
                 title: text(objects.get(link.caltopo)!.properties.title),
+                class: String(objects.get(link.caltopo)!.properties.class ?? ''),
             });
         }
     }
@@ -306,4 +320,29 @@ export function describe(action: Action): string {
         case 'delete': return `delete - ${action.title || '<untitled>'} (${action.tak})`;
         case 'skip': return `skip - ${action.title || '<untitled>'} (${action.id}): ${action.reason}`;
     }
+}
+
+/**
+ * The links once a plan is applied - applied holds the actions that succeeded, so a failed
+ * write keeps its old link (or none) and is retried next run. Links of adopted objects whose
+ * item left the Mission are dropped, as those objects are never deleted
+ */
+export function nextLinks(state: SyncState, tak: MissionFeature[], applied: Action[]): Link[] {
+    const links = new Map(state.links.map((l) => [l.tak, l]));
+
+    for (const action of applied) {
+        if (action.op === 'create') {
+            links.set(action.tak, { tak: action.tak, caltopo: action.tak, origin: 'tak', takHash: action.takHash, caltopoHash: action.takHash });
+        } else if (action.op === 'update') {
+            const link = links.get(action.tak)!;
+            links.set(action.tak, { ...link, takHash: action.takHash, caltopoHash: action.takHash });
+        } else if (action.op === 'adopt') {
+            links.set(action.tak, { tak: action.tak, caltopo: action.caltopo, origin: 'caltopo', takHash: action.takHash, caltopoHash: action.caltopoHash });
+        } else if (action.op === 'delete') {
+            links.delete(action.tak);
+        }
+    }
+
+    const present = new Set(tak.map((f) => f.id));
+    return [...links.values()].filter((l) => l.origin === 'tak' || present.has(l.tak));
 }
