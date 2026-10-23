@@ -20,6 +20,8 @@
 #                .incoming-env.json if present) - keep it out of git, it holds credentials
 #   OUTGOING_ENV JSON file of Outgoing settings, ie: PLI Connect Keys (default .outgoing-env.json
 #                if present) - keep it out of git, Connect Keys are credentials
+#   DATA         Data Sync ID the Layer's Incoming submissions are written to - the CalTopo →
+#                TAK half of a Mission Sync (default: leave as is)
 #   CONNECTION   Connection ID to move the Layer to - Outgoing Layers only receive the
 #                feature:* stream of their Connection (default: leave as is, new Layers
 #                are server-level)
@@ -61,6 +63,7 @@ if [ -f "$OUTGOING_ENV" ]; then
 fi
 
 CONNECTION="${CONNECTION:-}"
+DATA="${DATA:-}"
 
 # Outgoing configs without filters only stream positions, matching the README's recommended filter
 FILTERS='{"queries":[{"name":"Positions only","query":"$substring(properties.type, 0, 5) != '"'"'a-f-G'"'"'"}]}'
@@ -69,7 +72,7 @@ LAYER_ID="$(psql "$DEV_DB" -v ON_ERROR_STOP=1 -Atq \
     -v name="$LAYER_NAME" -v version="$VERSION" \
     -v incoming="$INCOMING" -v set_incoming="$SET_INCOMING" \
     -v outgoing="$OUTGOING" -v set_outgoing="$SET_OUTGOING" \
-    -v connection="$CONNECTION" -v filters="$FILTERS" <<'SQL'
+    -v connection="$CONNECTION" -v data="$DATA" -v filters="$FILTERS" <<'SQL'
 INSERT INTO integrations (prefix, name, repo)
     VALUES ('etl-caltopo', 'CalTopo', 'https://github.com/clptak/etl-caltopo')
     ON CONFLICT (prefix) DO NOTHING;
@@ -87,6 +90,9 @@ INSERT INTO layers_incoming (layer, cron, environment)
     ON CONFLICT (layer) DO UPDATE SET
         environment = CASE WHEN :'set_incoming' = 'true' THEN EXCLUDED.environment ELSE layers_incoming.environment END,
         updated = now();
+
+UPDATE layers_incoming SET data = NULLIF(:'data', '')::integer, updated = now()
+    WHERE :'data' <> '' AND layer = (SELECT id FROM layers WHERE name = :'name');
 
 INSERT INTO layers_outgoing (layer, subscriptions, environment, filters)
     SELECT id, ARRAY['feature:*'], :'outgoing'::jsonb, :'filters'::jsonb FROM layers WHERE name = :'name'

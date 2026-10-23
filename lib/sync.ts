@@ -262,7 +262,7 @@ export function unsupported(feature: MissionFeature): string | undefined {
  * Plan the TAK → CalTopo half of a Map/Mission pair
  *
  * - linked items whose TAK content changed since the last sync are updated in CalTopo, flagged
- *   as a conflict when the CalTopo object changed too
+ *   as a conflict when the CalTopo object changed too - unless they came from CalTopo, which owns them
  * - unlinked items sharing their ID with a CalTopo object (created from CalTopo, ie: by the
  *   Node-RED sync or CloudTAK's Data Sync) are adopted rather than created a second time
  * - other unlinked items are created
@@ -303,11 +303,13 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
         const canonical = canonicalTak(feature, folder);
         const link = links.get(feature.id);
 
-        if (canonical.folder && canonical.folder !== ASSIGNMENTS && !existingFolders.has(canonical.folder.toLowerCase())) {
+        // Only an object the sync writes needs its CalTopo Folder - an adopted one already has one
+        const writes = link ? link.origin === 'tak' : !objects.has(feature.id);
+        if (writes && canonical.folder && canonical.folder !== ASSIGNMENTS && !existingFolders.has(canonical.folder.toLowerCase())) {
             newFolders.add(canonical.folder);
         }
 
-        if (isAssignments(folder) && feature.geometry.type === 'Point') {
+        if (writes && isAssignments(folder) && feature.geometry.type === 'Point') {
             warnings.push(`${canonical.title || feature.id} is a Point in the ${ASSIGNMENTS} folder - CalTopo Assignments are lines or polygons, so it becomes a top level Marker`);
         }
 
@@ -319,6 +321,12 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
             }
 
             if (hash(canonical) === link.takHash) continue;
+
+            // CalTopo owns what came from CalTopo - the CalTopo → TAK half overwrites it in TAK
+            if (link.origin === 'caltopo') {
+                actions.push({ op: 'skip', id: feature.id, title: canonical.title, reason: 'came from CalTopo - edit it there' });
+                continue;
+            }
 
             actions.push({
                 op: 'update',
@@ -430,4 +438,15 @@ export function nextLinks(state: SyncState, tak: MissionFeature[], applied: Acti
 
     const present = new Set(tak.map((f) => f.id));
     return [...links.values()].filter((l) => l.origin === 'tak' || present.has(l.tak));
+}
+
+/**
+ * The CalTopo objects the CalTopo → TAK half sends to the Mission - everything but Folders,
+ * objects without geometry and the objects this sync created from TAK, which TAK owns and
+ * would otherwise echo back into the Mission
+ */
+export function calTopoToTak(caltopo: CalTopoFeature[], links: Link[]): CalTopoFeature[] {
+    const fromTak = new Set(links.filter((l) => l.origin === 'tak').map((l) => l.caltopo));
+
+    return caltopo.filter((f) => !fromTak.has(f.id) && f.properties.class !== 'Folder' && f.geometry);
 }

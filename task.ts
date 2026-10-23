@@ -9,7 +9,7 @@ import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, M
 import { PLIConfig, positionReport } from './lib/pli.js';
 import { ProfileTokenReader } from './lib/mission.js';
 import type { MissionReader } from './lib/mission.js';
-import { planTakToCalTopo, summary, describe, nextLinks } from './lib/sync.js';
+import { planTakToCalTopo, summary, describe, nextLinks, calTopoToTak } from './lib/sync.js';
 import type { SyncState, Plan, Action, CalTopoWrite } from './lib/sync.js';
 
 const MapSource = Type.Object({
@@ -418,14 +418,18 @@ export default class Task extends ETL {
 
                     if (source.DryRun) {
                         if (verbose) for (const action of plan.actions) console.log(`  ${describe(action)}`);
+                        await this.toTak(source, map, state.links, true);
                         continue;
                     }
 
                     const applied = await this.apply(caltopo, source, pair.MapId, map, plan);
-                    ephemeral[key] = { links: nextLinks(state, mission, applied) } satisfies SyncState;
+                    const links = nextLinks(state, mission, applied);
+                    ephemeral[key] = { links } satisfies SyncState;
 
                     const failed = plan.actions.filter((a) => a.op !== 'skip').length - applied.filter((a) => a.op !== 'skip').length;
                     console.log(`ok - ${label}: applied ${applied.filter((a) => a.op !== 'skip').length}${failed ? `, ${failed} failed - retried next run` : ''}`);
+
+                    await this.toTak(source, map, links, false);
                 } catch (err) {
                     // One broken pair must not stop the others
                     console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
@@ -437,6 +441,36 @@ export default class Task extends ETL {
                 await this.setEphemeral(ephemeral, DataFlowType.Incoming);
             }
         }
+    }
+
+    /**
+     * The CalTopo → TAK half - send the Map's objects (but those the sync created from TAK) to
+     * the Layer, whose Data Sync with Mission Diff writes them into its Mission and removes the
+     * ones that disappear. Without a Data Sync a submission would be broadcast to the Connection
+     * instead, and with several pairs their Maps would share one Mission, so both are refused
+     */
+    async toTak(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, links: SyncState['links'], dryRun: boolean): Promise<void> {
+        const layer = await this.fetchLayer();
+        const data = (layer.incoming as { data?: number | null } | undefined)?.data;
+
+        if (!data) {
+            console.log('ok - skip - CalTopo -> TAK: the Layer has no Data Sync');
+            return;
+        } else if (source.Pairs.length !== 1) {
+            console.log(`ok - skip - CalTopo -> TAK: a Layer's Data Sync is one Mission, so it needs exactly one pair, not ${source.Pairs.length}`);
+            return;
+        }
+
+        const objects = calTopoToTak(map, links);
+        const features = this.fromMap(objects as Static<typeof MapFeature>[]);
+
+        if (dryRun) {
+            console.log(`ok - dry run CalTopo -> TAK: would send ${features.length} CalTopo objects to Data Sync ${data}`);
+            return;
+        }
+
+        await this.submit({ type: 'FeatureCollection', features });
+        console.log(`ok - CalTopo -> TAK: sent ${features.length} CalTopo objects to Data Sync ${data}`);
     }
 
     /**
@@ -572,7 +606,9 @@ export default class Task extends ETL {
                 };
                 const metadata = feat.properties.metadata ?? {};
 
-                feat.properties.callsign = String(calFeat.properties.title);
+                // Assignments are labelled by their number rather than a title
+                const label = calFeat.properties.title ?? (calFeat.properties as Record<string, unknown>).number;
+                feat.properties.callsign = label ? String(label) : String(calFeat.properties.class);
                 feat.properties.remarks = calFeat.properties.description ? String(calFeat.properties.description) : '';
 
                 if (metadata.fill !== undefined) feat.properties.fill = String(metadata.fill);

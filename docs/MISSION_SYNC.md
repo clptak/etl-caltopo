@@ -23,6 +23,7 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | Locking against overlapping runs (`sync:lock`, honoured for 5 minutes) | Done |
 | Deleting from CalTopo (`DELETE /api/v1/map/{map}/{type}/{id}`, signed like a GET) | Done, verified on a real Map |
 | Icon & style translation - marker symbols, line & fill colour / width / opacity, dashed & dotted lines | Done, verified on a real Map |
+| CalTopo → TAK - the Map's own objects sent to the Layer's Data Sync each run | Done, verified - objects land in the Layer's Mission folder once, a resend of unchanged objects adds nothing |
 
 ## Placement rules
 
@@ -40,6 +41,9 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | Date | Decision | Why / follow up |
 | ---- | -------- | --------------- |
 | 2026-10-23 | CalTopo → TAK uses CloudTAK's Data Sync with Mission Diff; this ETL only does TAK → CalTopo | Data Sync already writes and removes Mission items - no need to rebuild it |
+| 2026-10-23 | An object is edited on the side it was created: CalTopo objects the sync created from TAK are never sent back to TAK, and TAK edits to objects that came from CalTopo are skipped | Stops the two halves echoing each other. Node-RED's last-edit-wins conflict handling is not ported |
+| 2026-10-23 | CalTopo → TAK only runs for a Layer with a Data Sync and a single pair | Without a Data Sync a submission is broadcast to the Connection; a Data Sync is one Mission |
+| 2026-10-23 | CloudTAK `DataMission.sync` now subscribes the Connection to a Mission it attaches (CloudTAK branch `dev-sqs-endpoint`) | It only did for Missions it created, and TAK Server drops streamed CoTs from an unsubscribed client - offer upstream |
 | 2026-10-23 | Missions are read with a dedicated service account's Profile API Token | CloudTAK's Mission routes reject Layer tokens. Temporary - replaced by the Layer scoped read below |
 | 2026-10-23 | TAK folders map to CalTopo Folders of the same name; the `Assignments` folder maps to the CalTopo Assignment class | Matches how segments, assignments & probability rings are organised in TAK |
 | 2026-10-23 | A Point in the `Assignments` folder (ie: the IPP) becomes a top level Marker | CalTopo Assignments must be lines or polygons |

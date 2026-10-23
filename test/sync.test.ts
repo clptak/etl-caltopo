@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe, nextLinks } from '../lib/sync.js';
+import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe, nextLinks, calTopoToTak } from '../lib/sync.js';
 import { folderNames } from '../lib/mission.js';
 import type { Link } from '../lib/sync.js';
 import type { MissionFeature } from '../lib/mission.js';
@@ -202,4 +202,35 @@ test('nextLinks - applied actions become links, failed ones are retried next run
     ]);
     assert.notEqual(links[0].takHash, state.links[0].takHash);
     assert.equal(links[1].takHash, links[1].caltopoHash);
+});
+
+test('planTakToCalTopo - items from CalTopo are owned by CalTopo: a TAK edit is skipped, their TAK folder is not created', () => {
+    const fromCalTopo = tak('ct-1', 'Helispot');
+    const object = caltopo('ct-1', 'Helispot');
+    const adopted = link(fromCalTopo, object, 'caltopo');
+
+    // Data Sync files CalTopo objects under a folder named after the Layer
+    const folders = new Map([['ct-1', 'CalTopo Sync']]);
+
+    const edited = { ...fromCalTopo, properties: { ...fromCalTopo.properties, callsign: 'Helispot (moved)' } };
+    const plan = planTakToCalTopo([edited], [object], { links: [adopted] }, folders);
+    assert.deepEqual(plan.actions.map(describe), ['skip - Helispot (moved) (ct-1): came from CalTopo - edit it there']);
+
+    const first = planTakToCalTopo([fromCalTopo], [object], { links: [] }, folders);
+    assert.deepEqual(first.actions.map((a) => a.op), ['adopt']);
+});
+
+test('calTopoToTak - CalTopo sends TAK everything but Folders, geometry-less objects & what the sync created from TAK', () => {
+    const objects = [
+        caltopo('ct-1', 'Drawn in CalTopo'),
+        caltopo('tak-1', 'Created from TAK'),
+        { id: 'f-1', properties: { class: 'Folder', title: 'Segments' } },
+        { id: 'op-1', properties: { class: 'OperationalPeriod', title: 'OP 1' } },
+    ];
+    const links = [
+        { tak: 'tak-1', caltopo: 'tak-1', origin: 'tak' as const, takHash: '', caltopoHash: '' },
+        { tak: 'ct-1', caltopo: 'ct-1', origin: 'caltopo' as const, takHash: '', caltopoHash: '' },
+    ];
+
+    assert.deepEqual(calTopoToTak(objects, links).map((o) => o.id), ['ct-1']);
 });

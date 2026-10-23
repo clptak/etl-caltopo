@@ -149,6 +149,19 @@ switches to that and the token goes away.
 
 With `DEBUG` on, each planned action is listed under the pair's summary line.
 
+### CalTopo → TAK
+
+CalTopo's own objects go back into the Mission through a CloudTAK Data Sync on the
+Layer's Connection:
+
+1. Create the Data Sync (Connection → Data) named **exactly** like the existing Mission -
+   CloudTAK finds the Mission by name and creates a new one otherwise - with Mission Sync
+   and Mission Diff on. Never turn Mission Sync off: CloudTAK then deletes the Mission.
+2. Link the Layer: `DATA=<data sync id> scripts/dev-layer.sh`
+3. Save the Data Sync once more (or edit the Layer in the UI) so CloudTAK creates the
+   Layer's folder in the Mission and subscribes the Connection to it - that needs the
+   CloudTAK fix on the `dev-sqs-endpoint` branch for a Mission it did not create.
+
 ## Caution
 
 The dev Layer has no Connection, so anything it submits goes to the dev

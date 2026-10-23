@@ -521,7 +521,7 @@ test('control - Sync source dry runs each pair with signed map reads and never s
  * Run a writing Mission Sync against the mock CalTopo, carrying the Layer's ephemeral store
  * between runs like CloudTAK does
  */
-async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1') {
+async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[] } = {}) {
     const task = await Task.init();
     const layer = {
         id: 1,
@@ -529,7 +529,8 @@ async function syncRun(base: string, ephemeral: Record<string, unknown>, mission
         task: 'etl-caltopo-v5.16.1',
         incoming: {
             environment: { Source: { Mode: 'Sync', ...CREDS, MissionToken: 'etl.profile', Pairs: [{ MapId: mapId, MissionGuid: 'mission-1' }], DryRun: false }, DEBUG: false },
-            ephemeral
+            ephemeral,
+            data: opts.data ?? null
         }
     };
 
@@ -542,6 +543,7 @@ async function syncRun(base: string, ephemeral: Record<string, unknown>, mission
 
     const saved: Record<string, unknown>[] = [];
     task.setEphemeral = async (ephem: Record<string, unknown>) => { saved.push(structuredClone(ephem)); };
+    task.submit = async (fc: { features: unknown[] }) => { opts.submitted?.push(...fc.features); return true; };
 
     await task.control();
     return saved;
@@ -635,5 +637,32 @@ test('control - a held lock skips the run, a failed write is retried next run', 
         assert.deepEqual(saved.pop(), { 'sync:READONLY:mission-1': { links: [] } });
     } finally {
         await readonly.close();
+    }
+});
+
+test('control - Sync sends CalTopo objects to the Layer Data Sync, never what it created from TAK', async () => {
+    const api = await mock({
+        map: [
+            { id: 'ct-marker', type: 'Feature', properties: { class: 'Marker', title: 'Helispot', description: '' }, geometry: { type: 'Point', coordinates: [-111.6, 35.1] } },
+            { id: 'ct-asg', type: 'Feature', properties: { class: 'Assignment', number: 'A-02', description: '' }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1], [-111.7, 35.2]] } }
+        ]
+    });
+
+    const mission = [{ id: 'tak-1', properties: { callsign: 'Staging' }, geometry: { type: 'Point', coordinates: [-111.5, 35.0] } }];
+
+    try {
+        const submitted: Array<{ id: string, properties: { callsign: string } }> = [];
+        await syncRun(api.base, {}, mission, new Map(), 'MAP1', { data: 7, submitted: submitted as unknown[] });
+
+        // tak-1 was created in CalTopo from TAK but the mock Map does not return it - CalTopo
+        // objects are what goes back, with the Assignment labelled by its number
+        assert.deepEqual(submitted.map((f) => [f.id, f.properties.callsign]), [['ct-marker', 'Helispot'], ['ct-asg', 'A-02']]);
+
+        // Without a Data Sync nothing is submitted
+        const none: unknown[] = [];
+        await syncRun(api.base, {}, mission, new Map(), 'MAP1', { submitted: none });
+        assert.deepEqual(none, []);
+    } finally {
+        await api.close();
     }
 });
