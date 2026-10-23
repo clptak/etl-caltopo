@@ -1,0 +1,20 @@
+# Local stand-ins for the AWS services a dev CloudTAK needs to stream to Outgoing Layers
+# See docs/LOCAL_DEV.md - start with (--env-file as this repo's .env is the ETL's JSON settings):
+#   docker-compose --env-file /dev/null -f docker-compose.dev.yml up -d
+name: cloudtak-dev-aws
+
+services:
+    # SQS - the Outgoing queues
+    sqs:
+        image: softwaremill/elasticmq-native:1.6.11
+        restart: unless-stopped
+        ports:
+            - "127.0.0.1:9324:9324"
+
+    # STS - CloudTAK reads the account ID from GetCallerIdentity to build queue URLs
+    # Pinned below 5.1.4, which sends a duplicate Date header the AWS SDK cannot parse
+    sts:
+        image: motoserver/moto:5.1.3
+        restart: unless-stopped
+        ports:
+            - "127.0.0.1:5055:5000"

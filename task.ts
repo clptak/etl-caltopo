@@ -193,7 +193,7 @@ export default class Task extends ETL {
 
         const report = positionReport(message, env.PLI);
         if ('skip' in report) {
-            if (env.DEBUG) console.log(`ok - skip - feature ${message.geojson.id}: ${report.skip}`);
+            if (env.DEBUG) console.log(`ok - skip - feature ${message.geojson.id} (${message.geojson.properties.callsign}, ${message.geojson.properties.type}): ${report.skip}`);
             return;
         }
 

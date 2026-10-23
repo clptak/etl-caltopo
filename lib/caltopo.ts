@@ -239,9 +239,12 @@ export default class CalTopo {
         if (this.verbose) console.log(`ok - reporting position of ${id}`);
 
         const res = await fetch(url, { safeUrlAllow: [this.url.origin] });
+        const body = (await res.text().catch(() => '')).trim();
+
         if (!res.ok) {
-            const body = await res.text().catch(() => '');
-            throw new Error(`CalTopo responded with HTTP ${res.status}${body ? `: ${body.trim().slice(0, 500)}` : ''}`);
+            throw new Error(`CalTopo responded with HTTP ${res.status}${body ? `: ${body.slice(0, 500)}` : ''}`);
+        } else if (this.verbose) {
+            console.log(`ok - CalTopo responded with HTTP ${res.status}: ${body.slice(0, 500) || '<empty>'}`);
         }
     }
 

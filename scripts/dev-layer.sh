@@ -18,6 +18,9 @@
 #   LAYER_NAME   Name of the dev Layer               (default "CalTopo Sync (dev)")
 #   OUTGOING_ENV JSON file of Outgoing settings, ie: PLI Connect Keys (default .outgoing-env.json
 #                if present) - keep it out of git, Connect Keys are credentials
+#   CONNECTION   Connection ID to move the Layer to - Outgoing Layers only receive the
+#                feature:* stream of their Connection (default: leave as is, new Layers
+#                are server-level)
 
 set -euo pipefail
 
@@ -43,30 +46,43 @@ if [ -f "$OUTGOING_ENV" ]; then
     OUTGOING="$(node -e "process.stdout.write(JSON.stringify(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))))" "$OUTGOING_ENV")"
 fi
 
+CONNECTION="${CONNECTION:-}"
+
+# Outgoing configs without filters only stream positions, matching the README's recommended filter
+FILTERS='{"queries":[{"name":"Positions only","query":"$substring(properties.type, 0, 5) != '"'"'a-f-G'"'"'"}]}'
+
 LAYER_ID="$(psql "$DEV_DB" -v ON_ERROR_STOP=1 -Atq \
     -v name="$LAYER_NAME" -v version="$VERSION" \
-    -v outgoing="$OUTGOING" -v set_outgoing="$SET_OUTGOING" <<'SQL'
+    -v outgoing="$OUTGOING" -v set_outgoing="$SET_OUTGOING" \
+    -v connection="$CONNECTION" -v filters="$FILTERS" <<'SQL'
 INSERT INTO integrations (prefix, name, repo)
     VALUES ('etl-caltopo', 'CalTopo', 'https://github.com/clptak/etl-caltopo')
     ON CONFLICT (prefix) DO NOTHING;
 
 INSERT INTO layers (name, description, connection, task, version)
-    SELECT :'name', 'Local dev Layer for etl-caltopo', NULL,
+    SELECT :'name', 'Local dev Layer for etl-caltopo', NULLIF(:'connection', '')::integer,
         (SELECT id FROM integrations WHERE prefix = 'etl-caltopo'), :'version'
-    WHERE NOT EXISTS (SELECT 1 FROM layers WHERE name = :'name' AND connection IS NULL);
+    WHERE NOT EXISTS (SELECT 1 FROM layers WHERE name = :'name');
+
+UPDATE layers SET connection = NULLIF(:'connection', '')::integer, updated = now()
+    WHERE name = :'name' AND :'connection' <> '' AND connection IS DISTINCT FROM NULLIF(:'connection', '')::integer;
 
 INSERT INTO layers_incoming (layer, cron)
-    SELECT id, 'rate(1 minute)' FROM layers WHERE name = :'name' AND connection IS NULL
+    SELECT id, 'rate(1 minute)' FROM layers WHERE name = :'name'
     ON CONFLICT (layer) DO NOTHING;
 
-INSERT INTO layers_outgoing (layer, subscriptions, environment)
-    SELECT id, ARRAY['feature:*'], :'outgoing'::jsonb FROM layers WHERE name = :'name' AND connection IS NULL
-    ON CONFLICT (layer) DO UPDATE SET environment = EXCLUDED.environment, updated = now()
-    WHERE :'set_outgoing' = 'true';
+INSERT INTO layers_outgoing (layer, subscriptions, environment, filters)
+    SELECT id, ARRAY['feature:*'], :'outgoing'::jsonb, :'filters'::jsonb FROM layers WHERE name = :'name'
+    ON CONFLICT (layer) DO UPDATE SET
+        environment = CASE WHEN :'set_outgoing' = 'true' THEN EXCLUDED.environment ELSE layers_outgoing.environment END,
+        filters = CASE WHEN layers_outgoing.filters = '{}'::jsonb THEN EXCLUDED.filters ELSE layers_outgoing.filters END,
+        updated = now();
 
-SELECT id FROM layers WHERE name = :'name' AND connection IS NULL;
+SELECT id || ' ' || COALESCE(connection::text, 'server') FROM layers WHERE name = :'name';
 SQL
 )"
+LAYER_CONNECTION="${LAYER_ID#* }"
+LAYER_ID="${LAYER_ID%% *}"
 
 # HS256 JWT signed with node:crypto so the secret never reaches argv or stdout
 ETL_API="$ETL_API" LAYER_ID="$LAYER_ID" CLOUDTAK_ENV="$CLOUDTAK_ENV" node --input-type=module <<'JS'
@@ -85,6 +101,6 @@ fs.writeFileSync('.env', JSON.stringify({
 }, null, 4) + '\n', { mode: 0o600 });
 JS
 
-echo "ok - Layer $LAYER_ID ($LAYER_NAME) registered in $DEV_DB"
+echo "ok - Layer $LAYER_ID ($LAYER_NAME) registered in $DEV_DB - Connection: $LAYER_CONNECTION"
 if [ "$SET_OUTGOING" = true ]; then echo "ok - Outgoing settings loaded from $OUTGOING_ENV"; fi
 echo "ok - wrote .env - run the ETL with: npx tsx task.ts"

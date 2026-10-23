@@ -69,6 +69,53 @@ With a real Connect Key the device appears under the Team's Trackable Devices in
 Callsigns that match no rule, or a non-friendly type passed as the 4th argument (ie:
 `a-h-G`), are logged as skipped when `DEBUG` is on.
 
+## Streaming live TAK positions locally
+
+To have real TAK clients flow through the ETL without AWS, local emulators stand in
+for SQS (the Outgoing queue) and STS (the account lookup CloudTAK builds queue URLs
+from), and `scripts/dev-queue.ts` does the Lambda trigger's job:
+
+```
+TAK clients → TAK Server → dev CloudTAK Connection → ElasticMQ (SQS) → scripts/dev-queue.ts → handler → CalTopo
+```
+
+This needs a CloudTAK that builds its queue URLs from `AWS_ENDPOINT_URL_SQS` (the
+`dev-sqs-endpoint` branch of the CloudTAK fork).
+
+1. Start the emulators (the `--env-file` keeps docker-compose from reading this repo's
+   JSON `.env`):
+
+   ```sh
+   docker-compose --env-file /dev/null -f docker-compose.dev.yml up -d
+   ```
+
+2. Create a Connection in the dev CloudTAK UI with a certificate whose TAK groups see
+   the clients, then move the dev Layer onto it - Outgoing Layers only receive their
+   own Connection's stream:
+
+   ```sh
+   CONNECTION=<connection id> scripts/dev-layer.sh
+   ```
+
+3. Restart the dev CloudTAK pointed at the emulators, with Connections and ETL events
+   on (the default `npm run dev` turns both off):
+
+   ```sh
+   cd ~/CloudTAK/api
+   AWS_ENDPOINT_URL_SQS=http://localhost:9324 AWS_ENDPOINT_URL_STS=http://localhost:5055 \
+   AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+   npx tsx watch index.ts --no-events --no-geofence
+   ```
+
+   The fake credentials only reach the emulators - other AWS calls of the dev CloudTAK
+   fail as they do without credentials.
+
+4. Run the queue consumer: `npx tsx scripts/dev-queue.ts`
+
+New Outgoing configs get a `Positions only` filter, so only `a-f-G` positions reach the
+queue. Callsigns still have to match a PLI rule in `.outgoing-env.json`. Unlike the
+Lambda, a message that fails is dropped rather than retried.
+
 ## Caution
 
 The dev Layer has no Connection, so anything it submits goes to the dev
