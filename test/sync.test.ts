@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe, nextLinks, calTopoToTak } from '../lib/sync.js';
-import { folderNames } from '../lib/mission.js';
+import { planTakToCalTopo, canonicalTak, canonicalCalTopo, hash, toCalTopo, summary, describe, nextLinks, calTopoToTak, takOrigin, withOrigins } from '../lib/sync.js';
+import { folderNames, folderIds } from '../lib/mission.js';
 import type { Link } from '../lib/sync.js';
 import type { MissionFeature } from '../lib/mission.js';
 
@@ -234,4 +234,37 @@ test('calTopoToTak - CalTopo sends TAK everything but Folders, App Tracks, geome
     ];
 
     assert.deepEqual(calTopoToTak(objects, links).map((o) => o.id), ['ct-1']);
+});
+
+test('origins - only items in the Layer\'s Mission folder came from CalTopo, adopted links are corrected', () => {
+    const fromTak = tak('seg-1', '01');
+    const fromCalTopo = tak('ct-1', 'Helispot');
+    const folders = new Map([['seg-1', 'Segments'], ['ct-1', 'CalTopo Sync']]);
+    // Matched by folder UID - the Layer's folder may carry another CloudTAK's name
+    const origin = takOrigin(new Map([['seg-1', 'seg-folder'], ['ct-1', 'layer-1']]), 'layer-1');
+
+    // A new Layer adopts both - the segment must stay owned by TAK
+    const plan = planTakToCalTopo([fromTak, fromCalTopo], [caltopo('seg-1', '01'), caltopo('ct-1', 'Helispot')], { links: [] }, folders);
+    const links = nextLinks({ links: [] }, [fromTak, fromCalTopo], plan.actions, origin);
+    assert.deepEqual(links.map((l) => [l.tak, l.origin]), [['seg-1', 'tak'], ['ct-1', 'caltopo']]);
+
+    // Links saved as caltopo by an earlier version are corrected, gone items keep theirs
+    const saved = [
+        { ...links[0], origin: 'caltopo' as const },
+        links[1],
+        { tak: 'gone', caltopo: 'gone', origin: 'caltopo' as const, takHash: '', caltopoHash: '' },
+    ];
+    assert.deepEqual(withOrigins(saved, [fromTak, fromCalTopo], origin).map((l) => [l.tak, l.origin]), [['seg-1', 'tak'], ['ct-1', 'caltopo'], ['gone', 'caltopo']]);
+
+    // So the TAK owned segment is never sent back by the CalTopo → TAK half
+    assert.deepEqual(calTopoToTak([caltopo('seg-1', '01'), caltopo('ct-1', 'Helispot')], withOrigins(saved, [fromTak, fromCalTopo], origin)).map((o) => o.id), ['ct-1']);
+});
+
+test('folderIds - items map to the UID of their innermost Mission folder', () => {
+    const ids = folderIds([
+        { name: 'CalTopo Sync (dev)', uid: 'layer-1', uids: [{ data: 'ct-1' }] },
+        { name: 'Segments', uid: 'f-seg', uids: [{ data: 's-1' }], mission_layers: [{ name: 'Night', uid: 'f-night', uids: [{ data: 's-2' }] }] },
+    ]);
+
+    assert.deepEqual([...ids], [['ct-1', 'layer-1'], ['s-1', 'f-seg'], ['s-2', 'f-night']]);
 });

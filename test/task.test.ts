@@ -450,15 +450,15 @@ test('outgoing - a rejected position is logged and never fails the batch', async
     }
 });
 
-test('outgoing - event:create without Team Account settings fails before any request', async () => {
+test('outgoing - event:create without Team Account settings is skipped, not failed', async () => {
     const api = await mock();
 
     try {
-        await assert.rejects(
-            outgoing(api.base, { PLI, MapMode: 'sar', MapSharing: 'SECRET', MapLayers: [{ layer: 'mbt' }], MarkerColor: 'FF0000', DEBUG: false }, [CREATE], { current: {} }),
-            /event:create requires the AccountId, TeamId, CredentialId & CredentialSecret/
-        );
-        assert.equal(api.requests.length, 0);
+        // A PLI only Layer is subscribed to event:create too, as CloudTAK subscribes every declared type
+        const res = await outgoing(api.base, { PLI, MapMode: 'sar', MapSharing: 'SECRET', MapLayers: [{ layer: 'mbt' }], MarkerColor: 'FF0000', DEBUG: false }, [CREATE, position('CCSO-SAR 12')], { current: {} });
+
+        assert.deepEqual(api.requests.map((r) => r.pathname), ['/api/v1/position/report/KEY-VOL']);
+        assert.deepEqual(res.fetched, []);
     } finally {
         await api.close();
     }
@@ -496,7 +496,7 @@ test('control - Sync source dry runs each pair with signed map reads and never s
 
         const read: string[] = [];
         task.missionReader = () => ({
-            folders: async () => new Map([['tak-1', 'Segments']]),
+            folders: async () => ({ names: new Map([['tak-1', 'Segments']]), ids: new Map([['tak-1', 'seg-folder']]) }),
             features: async (guid: string) => {
                 read.push(guid);
                 return [
@@ -527,7 +527,7 @@ test('control - Sync source dry runs each pair with signed map reads and never s
  * Run a writing Mission Sync against the mock CalTopo, carrying the Layer's ephemeral store
  * between runs like CloudTAK does
  */
-async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[], appTracks?: Record<string, unknown>, seen?: Record<string, number>, submissions?: Array<{ schema?: string, archive?: boolean, features: unknown[] }> } = {}) {
+async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[], appTracks?: Record<string, unknown>, seen?: Record<string, number>, dataSyncFails?: boolean, submissions?: Array<{ schema?: string, archive?: boolean, features: unknown[] }> } = {}) {
     const task = await Task.init();
     const layer = {
         id: 1,
@@ -546,12 +546,13 @@ async function syncRun(base: string, ephemeral: Record<string, unknown>, mission
     // @ts-expect-error private in base
     task.layer = layer;
     task.client = (verbose: boolean) => new CalTopo({ url: base, verbose });
-    task.missionReader = () => ({ folders: async () => folders, features: async () => mission as never });
+    task.missionReader = () => ({ folders: async () => ({ names: folders, ids: new Map() }), features: async () => mission as never });
 
     const saved: Record<string, unknown>[] = [];
     task.setEphemeral = async (ephem: Record<string, unknown>) => { saved.push(structuredClone(ephem)); };
     task.submit = async (fc: { schema?: string, features: unknown[] }, submitOpts?: { archive?: boolean }) => {
         if (fc.schema) opts.submissions?.push({ schema: fc.schema, archive: submitOpts?.archive, features: fc.features });
+        else if (opts.dataSyncFails) throw new Error('Failed to post layer to ETL (400 - Submitted)');
         else opts.submitted?.push(...fc.features);
         return true;
     };
@@ -718,6 +719,11 @@ test('control - Sync sends fresh App Tracks to the Connection as live positions,
         assert.equal(submissions[0].archive, false);
         assert.deepEqual(submissions[0].features.map((f) => [f.id, f.properties.callsign]), [['caltopo-apptrack-trk-1', 'CALTOPO GUY']]);
 
+        // A rejected Data Sync submission does not hold back the live positions
+        const afterFailure: typeof submissions = [];
+        await syncRun(api.base, {}, [], new Map(), 'MAP1', { data: 7, submissions: afterFailure as never, appTracks, dataSyncFails: true, seen: { 'also on atak': now - 60_000 } });
+        assert.deepEqual(afterFailure.map((s) => s.features.length), [1]);
+
         // Without the AppTracks setting nothing is sent
         const none: unknown[] = [];
         await syncRun(api.base, {}, [], new Map(), 'MAP1', { data: 7, submissions: none as never });
@@ -738,4 +744,15 @@ test('outgoing - a forwarded TAK position records its callsign once per refresh 
     } finally {
         await api.close();
     }
+});
+
+test('fromMap - non colour fill & stroke values (a finished App Track) are dropped, colours kept', async () => {
+    const task = await Task.init();
+
+    const [track] = task.fromMap([
+        { id: 'trk-1', type: 'Feature', properties: { title: 'Caltopo Guy', class: 'Shape', creator: 'x', updated: 1, fill: 'solid', stroke: '#f0f000', 'stroke-width': 2 }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1, 2100, 1], [-111.7, 35.2, 2100, 2]] } },
+    ]);
+
+    assert.equal(track.properties.fill, undefined);
+    assert.equal(track.properties.stroke, '#f0f000');
 });

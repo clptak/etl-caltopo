@@ -12,7 +12,7 @@ import type { SeenCallsigns } from './lib/apptracks.js';
 import { ProfileTokenReader } from './lib/mission.js';
 import { ICONS } from './lib/style.js';
 import type { MissionReader } from './lib/mission.js';
-import { planTakToCalTopo, summary, describe, nextLinks, calTopoToTak } from './lib/sync.js';
+import { planTakToCalTopo, summary, describe, nextLinks, calTopoToTak, takOrigin, withOrigins } from './lib/sync.js';
 import type { SyncState, Plan, Action, CalTopoWrite } from './lib/sync.js';
 
 const MapSource = Type.Object({
@@ -66,6 +66,11 @@ const SyncSource = Type.Composite([
     title: 'Mission Sync',
     description: 'Syncs TAK Mission items to CalTopo Maps - TAK folders become CalTopo Folders, the Assignments folder becomes CalTopo Assignments',
 });
+
+/** A CSS hex colour, the only colour form CloudTAK accepts */
+function isColor(value: unknown): boolean {
+    return typeof value === 'string' && /^#?([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
+}
 
 /** Outgoing ephemeral key of the TAK client callsigns the PLI forwarding has seen */
 const SEEN_KEY = 'pli:seen';
@@ -202,7 +207,14 @@ export default class Task extends ETL {
                 continue;
             }
 
+            // CloudTAK subscribes every Layer to every Outgoing type the task declares, so a Layer
+            // used only for PLI receives event:create too - without Team settings it is skipped
+            // rather than failed, which would only retry it into the dead letter queue
             const team = Task.teamAccount(env);
+            if (!team) {
+                console.log(`ok - skip - event:create of ${(message.data as { id?: string }).id ?? 'an Event'}: no Team Account settings to create a CalTopo Map with`);
+                continue;
+            }
 
             // The message is a snapshot from creation time - read the Event back so a redelivery sees the Map ID
             const core = await this.coreEvent(this.type(CoreEvent, message.data).id);
@@ -268,13 +280,14 @@ export default class Task extends ETL {
         }
     }
 
-    /** The Team Account settings event:create needs - optional in the schema for PLI only Layers */
-    static teamAccount(env: OutgoingEnv): { TeamId: string, CredentialId: string, CredentialSecret: string } {
+    /**
+     * The Team Account settings event:create needs - optional in the schema for PLI only Layers,
+     * undefined unless all are set
+     */
+    static teamAccount(env: OutgoingEnv): { TeamId: string, CredentialId: string, CredentialSecret: string } | undefined {
         const { AccountId, TeamId, CredentialId, CredentialSecret } = env;
 
-        if (!AccountId || !TeamId || !CredentialId || !CredentialSecret) {
-            throw new Error('event:create requires the AccountId, TeamId, CredentialId & CredentialSecret Outgoing settings');
-        }
+        if (!AccountId || !TeamId || !CredentialId || !CredentialSecret) return undefined;
 
         return { TeamId, CredentialId, CredentialSecret };
     }
@@ -440,7 +453,11 @@ export default class Task extends ETL {
                     const folders = (foldersRead as PromiseFulfilledResult<Awaited<ReturnType<MissionReader['folders']>>>).value;
                     const map = (mapRead as PromiseFulfilledResult<Awaited<ReturnType<CalTopo['teamMap']>>>).value;
 
-                    const plan = planTakToCalTopo(mission, map, state, folders);
+                    // Items filed under the Layer's own Mission folder came from CalTopo, all others from TAK
+                    const origin = takOrigin(folders.ids, `layer-${(await this.fetchLayer()).id}`);
+                    state.links = withOrigins(state.links, mission, origin);
+
+                    const plan = planTakToCalTopo(mission, map, state, folders.names);
 
                     console.log(`ok - ${label}: ${mission.length} Mission items, ${map.length} CalTopo objects, ${state.links.length} linked - ${summary(plan)}`);
                     for (const warning of plan.warnings) console.log(`warn - ${warning}`);
@@ -453,14 +470,15 @@ export default class Task extends ETL {
                     }
 
                     const applied = await this.apply(caltopo, source, pair.MapId, map, plan);
-                    const links = nextLinks(state, mission, applied);
+                    const links = nextLinks(state, mission, applied, origin);
                     ephemeral[key] = { links } satisfies SyncState;
 
                     const failed = plan.actions.filter((a) => a.op !== 'skip').length - applied.filter((a) => a.op !== 'skip').length;
                     console.log(`ok - ${label}: applied ${applied.filter((a) => a.op !== 'skip').length}${failed ? `, ${failed} failed - retried next run` : ''}`);
 
-                    await this.toTak(source, map, links, false);
-                    await this.appTracks(source, map, false);
+                    // Each half is independent - a rejected CalTopo object must not hold back live positions
+                    await this.guarded(`${label} CalTopo -> TAK`, () => this.toTak(source, map, links, false));
+                    await this.guarded(`${label} App Tracks`, () => this.appTracks(source, map, false));
                 } catch (err) {
                     // One broken pair must not stop the others
                     console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
@@ -502,6 +520,15 @@ export default class Task extends ETL {
 
         await this.submit({ type: 'FeatureCollection', features });
         console.log(`ok - CalTopo -> TAK: sent ${features.length} CalTopo objects to Data Sync ${data}`);
+    }
+
+    /** Run one step of a sync, logging rather than throwing its failure */
+    async guarded(label: string, step: () => Promise<void>): Promise<void> {
+        try {
+            await step();
+        } catch (err) {
+            console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
+        }
     }
 
     /**
@@ -682,9 +709,11 @@ export default class Task extends ETL {
                 feat.properties.callsign = label ? String(label) : String(calFeat.properties.class);
                 feat.properties.remarks = calFeat.properties.description ? String(calFeat.properties.description) : '';
 
-                if (metadata.fill !== undefined) feat.properties.fill = String(metadata.fill);
+                // CalTopo stores non colour values too (a finished App Track has fill "solid"), which
+                // CloudTAK rejects - failing the whole submission - so only colours are passed on
+                if (isColor(metadata.fill)) feat.properties.fill = String(metadata.fill);
                 if (metadata['fill-opacity'] !== undefined) feat.properties['fill-opacity'] = Number(metadata['fill-opacity']);
-                if (metadata.stroke !== undefined) feat.properties.stroke = String(metadata.stroke);
+                if (isColor(metadata.stroke)) feat.properties.stroke = String(metadata.stroke);
                 if (metadata['stroke-opacity'] !== undefined) feat.properties['stroke-opacity'] = Number(metadata['stroke-opacity']);
                 if (metadata['stroke-width'] !== undefined) feat.properties['stroke-width'] = Number(metadata['stroke-width']);
 

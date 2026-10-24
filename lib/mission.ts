@@ -21,6 +21,7 @@ const MissionFeatures = Type.Object({
 /** A Mission folder (TAK Mission Layer) - folders nest and list the UIDs of the items in them */
 type MissionLayer = {
     name: string;
+    uid?: string;
     uids?: Array<{ data: string }>;
     mission_layers?: MissionLayer[];
 };
@@ -47,6 +48,30 @@ export function folderNames(layers: MissionLayer[]): Map<string, string> {
 }
 
 /**
+ * Map each item UID to the UID of the innermost Mission folder it is in - names can be shared or
+ * renamed, UIDs can not (ie: CloudTAK files a Layer's Data Sync items under layer-<Layer id>)
+ */
+export function folderIds(layers: MissionLayer[]): Map<string, string> {
+    const folders = new Map<string, string>();
+
+    const walk = (list: MissionLayer[]) => {
+        for (const layer of list) {
+            if (layer.uid) for (const uid of layer.uids ?? []) folders.set(uid.data, layer.uid);
+            walk(layer.mission_layers ?? []);
+        }
+    };
+
+    walk(layers);
+    return folders;
+}
+
+/** The folder of each Mission item, by name for CalTopo placement and by UID for ownership */
+export type MissionFolders = {
+    names: Map<string, string>;
+    ids: Map<string, string>;
+};
+
+/**
  * Reads the current contents of a TAK Mission
  *
  * The sync only depends on this interface, so how the Mission is read can change without
@@ -55,8 +80,8 @@ export function folderNames(layers: MissionLayer[]): Map<string, string> {
 export interface MissionReader {
     features(guid: string): Promise<MissionFeature[]>;
 
-    /** The Mission folder name of each item UID - items outside a folder are absent */
-    folders(guid: string): Promise<Map<string, string>>;
+    /** The Mission folder of each item UID - items outside a folder are absent */
+    folders(guid: string): Promise<MissionFolders>;
 }
 
 /**
@@ -78,8 +103,9 @@ export class ProfileTokenReader implements MissionReader {
         return (await (await this.get(guid, 'cot')).typed(MissionFeatures)).features;
     }
 
-    async folders(guid: string): Promise<Map<string, string>> {
-        return folderNames((await (await this.get(guid, 'layer')).typed(MissionLayers)).data);
+    async folders(guid: string): Promise<MissionFolders> {
+        const layers = (await (await this.get(guid, 'layer')).typed(MissionLayers)).data;
+        return { names: folderNames(layers), ids: folderIds(layers) };
     }
 
     async get(guid: string, resource: 'cot' | 'layer') {

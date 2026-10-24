@@ -417,7 +417,29 @@ export function describe(action: Action): string {
  * write keeps its old link (or none) and is retried next run. Links of adopted objects whose
  * item left the Mission are dropped, as those objects are never deleted
  */
-export function nextLinks(state: SyncState, tak: MissionFeature[], applied: Action[]): Link[] {
+/**
+ * Which side a Mission item came from - CloudTAK's Data Sync files what the CalTopo → TAK half
+ * sends under the Mission folder layer-<Layer id>, so an item there came from CalTopo and
+ * anything else from TAK. Matched by folder UID, as the folder's name can be stale (ie: a folder
+ * another CloudTAK's Layer with the same id created and named)
+ */
+export function takOrigin(folders: Map<string, string>, layerFolder: string): (uid: string) => Link['origin'] {
+    return (uid) => {
+        const folder = folders.get(uid);
+        return folder !== undefined && folder === layerFolder ? 'caltopo' : 'tak';
+    };
+}
+
+/**
+ * The links with the origin of every item still in the Mission taken from where it is filed - so
+ * links saved without knowing (ie: adopted by a new Layer, which has no saved links) are corrected
+ */
+export function withOrigins(links: Link[], tak: MissionFeature[], origin: (uid: string) => Link['origin']): Link[] {
+    const present = new Set(tak.map((f) => f.id));
+    return links.map((l) => present.has(l.tak) ? { ...l, origin: origin(l.tak) } : l);
+}
+
+export function nextLinks(state: SyncState, tak: MissionFeature[], applied: Action[], origin: (uid: string) => Link['origin'] = () => 'caltopo'): Link[] {
     const links = new Map(state.links.map((l) => [l.tak, l]));
 
     for (const action of applied) {
@@ -427,7 +449,7 @@ export function nextLinks(state: SyncState, tak: MissionFeature[], applied: Acti
             const link = links.get(action.tak)!;
             links.set(action.tak, { ...link, takHash: action.takHash, caltopoHash: action.takHash });
         } else if (action.op === 'adopt') {
-            links.set(action.tak, { tak: action.tak, caltopo: action.caltopo, origin: 'caltopo', takHash: action.takHash, caltopoHash: action.caltopoHash });
+            links.set(action.tak, { tak: action.tak, caltopo: action.caltopo, origin: origin(action.tak), takHash: action.takHash, caltopoHash: action.caltopoHash });
         } else if (action.op === 'delete') {
             links.delete(action.tak);
         }
