@@ -56,7 +56,7 @@ position before it leaves CloudTAK. A filter query that evaluates to `true` drop
 $substring(properties.type, 0, 5) != 'a-f-G'
 ```
 
-The forwarding is a single HTTP request, so the Layer runs comfortably with 128 MB of memory.
+Keep the Layer at its default 256 MB - the task uses about 175 MB even for a single forwarded position, so 128 MB runs out of memory.
 
 ## Team Access Token
 

@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  What a self-hosted (non-AWS) CloudTAK needs in an AWS account to deploy its ETL Layers as
+  Lambdas: the ETL image repository, the role the Lambdas run as, a least-privilege IAM user
+  for CloudTAK, the exports CloudTAK's Layer stacks import and a budget alert.
+
+  Deploy it with a stack name equal to CloudTAK's StackName (dev CloudTAK: "test") - CloudTAK
+  reads this stack and names every Layer stack <StackName>-layer-<id>. See deploy/README.md.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: ccso-dev
+    AllowedPattern: '[a-z0-9-]+'
+    Description: >-
+      Names the image repository tak-vpc-<Environment>-cloudtak-tasks, the convention of the
+      cloudtak-etl build tool (run it with Environment=<this value>)
+  CloudTAKUrl:
+    Type: String
+    AllowedPattern: 'https://.+'
+    Description: >-
+      Public HTTPS URL the Lambdas post their results to (CloudTAK's API_URL). It can only be
+      changed while no Layer stack imports it.
+  BudgetEmail:
+    Type: String
+    Description: Email notified when spending passes the budget
+  BudgetLimit:
+    Type: Number
+    Default: 5
+    Description: Monthly budget in USD
+
+Resources:
+  TasksRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub tak-vpc-${Environment}-cloudtak-tasks
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      # Lambda pulls the image of each Layer function in this account
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaPull
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringLike:
+                aws:sourceArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-layer-*
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep the 20 newest images",
+              "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 20 },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  # The role every Layer Lambda runs as - logs, and reading its Outgoing queue
+  ETLRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: outgoing-queues
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-layer-*
+
+  # CloudTAK's identity in AWS - create its access key in the console, never in this template
+  CloudTAKUser:
+    Type: AWS::IAM::User
+    Properties:
+      ManagedPolicyArns:
+        - !Ref CloudTAKPolicy
+
+  CloudTAKPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Deploy, invoke and observe CloudTAK ETL Layer stacks - nothing else
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # CloudFormation creates the Layer resources with these same credentials
+          - Sid: LayerStacks
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:CancelUpdateStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:GetTemplate
+            Resource:
+              - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}-layer-*/*
+              - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
+          - Sid: LayerFunctions
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:InvokeFunction
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:ListTags
+            Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-layer-*
+          - Sid: LayerQueueTriggers
+            Effect: Allow
+            Action:
+              - lambda:CreateEventSourceMapping
+              - lambda:DeleteEventSourceMapping
+              - lambda:GetEventSourceMapping
+              - lambda:UpdateEventSourceMapping
+            Resource: '*'
+          - Sid: TaskImages
+            Effect: Allow
+            Action:
+              - ecr:DescribeImages
+              - ecr:ListImages
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - ecr:DescribeRepositories
+            Resource: !GetAtt TasksRepository.Arn
+          - Sid: LayerLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:TagResource
+              - logs:TagLogGroup
+              - logs:DescribeLogStreams
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-layer-*
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-layer-*:*
+          - Sid: LayerSchedules
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:EnableRule
+              - events:DisableRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:TagResource
+            Resource: !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${AWS::StackName}-layer-*
+          - Sid: LayerQueues
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:SetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:TagQueue
+              - sqs:ListQueueTags
+              - sqs:SendMessage
+            Resource: !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-layer-*
+          - Sid: LayerAlarms
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:TagResource
+            Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-layer-*
+          - Sid: PassETLRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt ETLRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: lambda.amazonaws.com
+          # Read-only calls that do not support resource scoping
+          - Sid: Describe
+            Effect: Allow
+            Action:
+              - cloudformation:ListStacks
+              - logs:DescribeLogGroups
+              - cloudwatch:DescribeAlarms
+              - sts:GetCallerIdentity
+            Resource: '*'
+
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub ${AWS::StackName}-cloudtak-etl
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetLimit
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+
+Outputs:
+  # Imported by every Layer stack - Lambda.generate() in CloudTAK's api/stateless/lib/aws/lambda.ts
+  Hosted:
+    Description: CloudTAK URL the Lambdas post to (ETL_API)
+    Value: !Ref CloudTAKUrl
+    Export:
+      Name: !Sub ${AWS::StackName}-hosted
+  ETLRoleArn:
+    Description: Role the Layer Lambdas run as
+    Value: !GetAtt ETLRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-etl-role
+  TasksRepositoryName:
+    Description: CloudTAK's ECR_TASKS_REPOSITORY_NAME
+    Value: !Ref TasksRepository
+  CloudTAKUserName:
+    Description: Create this user's access key in the IAM console for CloudTAK
+    Value: !Ref CloudTAKUser
