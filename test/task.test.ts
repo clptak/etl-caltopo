@@ -202,6 +202,9 @@ async function outgoing(base: string, environment: Record<string, unknown>, reco
 
     task.client = (verbose: boolean) => new CalTopo({ url: base, verbose });
 
+    const ephemerals: Record<string, unknown>[] = [];
+    task.setEphemeral = async (ephem: Record<string, unknown>) => { ephemerals.push(ephem); };
+
     const fetched: Fetched[] = [];
     // @ts-expect-error loosely typed CloudTAK responses
     task.fetch = async (url: string, init: { method?: string, body?: string } = {}) => {
@@ -219,7 +222,7 @@ async function outgoing(base: string, environment: Record<string, unknown>, reco
 
     await task.outgoing({ Records: records.map((body) => ({ body: JSON.stringify(body) })) } as never);
 
-    return { fetched };
+    return { fetched, ephemerals };
 }
 
 const EVENT = {
@@ -524,17 +527,18 @@ test('control - Sync source dry runs each pair with signed map reads and never s
  * Run a writing Mission Sync against the mock CalTopo, carrying the Layer's ephemeral store
  * between runs like CloudTAK does
  */
-async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[] } = {}) {
+async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[], appTracks?: Record<string, unknown>, seen?: Record<string, number>, submissions?: Array<{ schema?: string, archive?: boolean, features: unknown[] }> } = {}) {
     const task = await Task.init();
     const layer = {
         id: 1,
         connection: 1,
         task: 'etl-caltopo-v5.16.1',
         incoming: {
-            environment: { Source: { Mode: 'Sync', ...CREDS, MissionToken: 'etl.profile', Pairs: [{ MapId: mapId, MissionGuid: 'mission-1' }], DryRun: false }, DEBUG: false },
+            environment: { Source: { Mode: 'Sync', ...CREDS, MissionToken: 'etl.profile', Pairs: [{ MapId: mapId, MissionGuid: 'mission-1' }], DryRun: false, ...(opts.appTracks ? { AppTracks: opts.appTracks } : {}) }, DEBUG: false },
             ephemeral,
             data: opts.data ?? null
-        }
+        },
+        outgoing: { environment: {}, ephemeral: opts.seen ? { 'pli:seen': opts.seen } : {}, subscriptions: [] }
     };
 
     // @ts-expect-error partial layer for testing
@@ -546,7 +550,11 @@ async function syncRun(base: string, ephemeral: Record<string, unknown>, mission
 
     const saved: Record<string, unknown>[] = [];
     task.setEphemeral = async (ephem: Record<string, unknown>) => { saved.push(structuredClone(ephem)); };
-    task.submit = async (fc: { features: unknown[] }) => { opts.submitted?.push(...fc.features); return true; };
+    task.submit = async (fc: { schema?: string, features: unknown[] }, submitOpts?: { archive?: boolean }) => {
+        if (fc.schema) opts.submissions?.push({ schema: fc.schema, archive: submitOpts?.archive, features: fc.features });
+        else opts.submitted?.push(...fc.features);
+        return true;
+    };
 
     await task.control();
     return saved;
@@ -683,4 +691,51 @@ test('fromMap - a mapped CalTopo marker symbol becomes its TAK iconset icon & Co
 
     assert.equal(plain.properties.type, 'u-d-p');
     assert.equal(plain.properties.icon, undefined);
+});
+
+test('control - Sync sends fresh App Tracks to the Connection as live positions, never into the Mission', async () => {
+    const now = Date.now();
+    const api = await mock({
+        map: [
+            { id: 'trk-1', type: 'Feature', properties: { class: 'AppTrack', title: 'Caltopo Guy' }, geometry: { type: 'LineString', coordinates: [[-111.684, 35.173, 2144, now - 30_000], [-111.6835, 35.1729, 2145, now - 5_000]] } },
+            { id: 'trk-2', type: 'Feature', properties: { class: 'AppTrack', title: 'Also On ATAK' }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1, 2100, now - 5_000]] } },
+            { id: 'trk-3', type: 'Feature', properties: { class: 'AppTrack', title: 'Went Home' }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1, 2100, now - 60 * 60_000]] } }
+        ]
+    });
+
+    const appTracks = { MaxAge: 600, GroupName: 'White', Role: 'Team Member', CallsignLookup: [], NameFilter: [] };
+
+    try {
+        const submitted: unknown[] = [];
+        const submissions: Array<{ schema?: string, archive?: boolean, features: Array<{ id: string, properties: { callsign: string } }> }> = [];
+        await syncRun(api.base, {}, [], new Map(), 'MAP1', { data: 7, submitted, submissions: submissions as never, appTracks, seen: { 'also on atak': now - 60_000 } });
+
+        // Not in the Data Sync batch
+        assert.deepEqual(submitted, []);
+
+        assert.equal(submissions.length, 1);
+        assert.equal(submissions[0].schema, 'caltopo-app-tracks');
+        assert.equal(submissions[0].archive, false);
+        assert.deepEqual(submissions[0].features.map((f) => [f.id, f.properties.callsign]), [['caltopo-apptrack-trk-1', 'CALTOPO GUY']]);
+
+        // Without the AppTracks setting nothing is sent
+        const none: unknown[] = [];
+        await syncRun(api.base, {}, [], new Map(), 'MAP1', { data: 7, submissions: none as never });
+        assert.deepEqual(none, []);
+    } finally {
+        await api.close();
+    }
+});
+
+test('outgoing - a forwarded TAK position records its callsign once per refresh window', async () => {
+    const api = await mock();
+
+    try {
+        const res = await outgoing(api.base, { PLI, DEBUG: false, MapMode: 'sar', MapSharing: 'SECRET', MapLayers: [{ layer: 'mbt' }], MarkerColor: 'FF0000' }, [position('CCSO-SAR 12')]);
+
+        assert.equal(res.ephemerals.length, 1);
+        assert.deepEqual(Object.keys(res.ephemerals[0]['pli:seen'] as object), ['ccso-sar 12']);
+    } finally {
+        await api.close();
+    }
 });

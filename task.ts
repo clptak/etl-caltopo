@@ -7,6 +7,8 @@ import { coordEach } from '@turf/meta';
 import { randomUUID } from 'node:crypto';
 import CalTopo, { Credentials, MapObject, MapFeature, LocationFeature, NewMap, MapMode, MapSharing, LOCATION_TTL } from './lib/caltopo.js';
 import { PLIConfig, positionReport } from './lib/pli.js';
+import { AppTrackConfig, appTrackPosition, recordSeen } from './lib/apptracks.js';
+import type { SeenCallsigns } from './lib/apptracks.js';
 import { ProfileTokenReader } from './lib/mission.js';
 import { ICONS } from './lib/style.js';
 import type { MissionReader } from './lib/mission.js';
@@ -58,11 +60,18 @@ const SyncSource = Type.Composite([
             default: true,
             description: 'Log what would change in CalTopo without writing',
         }),
+        AppTracks: Type.Optional(AppTrackConfig),
     })
 ], {
     title: 'Mission Sync',
     description: 'Syncs TAK Mission items to CalTopo Maps - TAK folders become CalTopo Folders, the Assignments folder becomes CalTopo Assignments',
 });
+
+/** Outgoing ephemeral key of the TAK client callsigns the PLI forwarding has seen */
+const SEEN_KEY = 'pli:seen';
+
+/** Named schema of App Track positions - routes them to the Connection instead of the Data Sync */
+const APP_TRACK_SCHEMA = 'caltopo-app-tracks';
 
 /** Ephemeral key holding the start time of a writing sync run, and how long it is honoured */
 const SYNC_LOCK = 'sync:lock';
@@ -237,6 +246,25 @@ export default class Task extends ETL {
             if (env.DEBUG) console.log(`ok - forwarded ${report.id} to ${report.rule.Name}`);
         } catch (err) {
             console.error(`not ok - failed to forward ${report.id} to ${report.rule.Name}:`, err instanceof Error ? err.message : String(err));
+        }
+
+        await this.recordCallsign(report.id);
+    }
+
+    /**
+     * Remember a TAK client's callsign, so the Mission Sync does not send a CalTopo App Track of
+     * the same person as a second position. Written at most every few minutes per callsign, and
+     * best effort - a lost record only means a duplicate position until the next one
+     */
+    async recordCallsign(callsign: string): Promise<void> {
+        try {
+            const ephemeral = { ...((await this.fetchLayer()).outgoing?.ephemeral ?? {}) } as Record<string, unknown>;
+            const seen = recordSeen((ephemeral[SEEN_KEY] ?? {}) as SeenCallsigns, callsign);
+            if (!seen) return;
+
+            await this.setEphemeral({ ...ephemeral, [SEEN_KEY]: seen }, DataFlowType.Outgoing);
+        } catch (err) {
+            console.error(`not ok - failed to record callsign ${callsign}:`, err instanceof Error ? err.message : String(err));
         }
     }
 
@@ -420,6 +448,7 @@ export default class Task extends ETL {
                     if (source.DryRun) {
                         if (verbose) for (const action of plan.actions) console.log(`  ${describe(action)}`);
                         await this.toTak(source, map, state.links, true);
+                        await this.appTracks(source, map, true);
                         continue;
                     }
 
@@ -431,6 +460,7 @@ export default class Task extends ETL {
                     console.log(`ok - ${label}: applied ${applied.filter((a) => a.op !== 'skip').length}${failed ? `, ${failed} failed - retried next run` : ''}`);
 
                     await this.toTak(source, map, links, false);
+                    await this.appTracks(source, map, false);
                 } catch (err) {
                     // One broken pair must not stop the others
                     console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
@@ -472,6 +502,46 @@ export default class Task extends ETL {
 
         await this.submit({ type: 'FeatureCollection', features });
         console.log(`ok - CalTopo -> TAK: sent ${features.length} CalTopo objects to Data Sync ${data}`);
+    }
+
+    /**
+     * Send the Map's App Tracks to the Layer's Connection as live TAK positions - not to the
+     * Data Sync, so they reach every client in the Connection's groups as contacts and expire
+     * on their own rather than sitting in the Mission. A callsign the PLI forwarding recently saw
+     * from a TAK client is skipped, as that person already shows as themselves
+     */
+    async appTracks(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, dryRun: boolean): Promise<void> {
+        if (!source.AppTracks) return;
+
+        const layer = await this.fetchLayer();
+        if (!layer.connection) {
+            console.log('ok - skip - App Tracks: the Layer has no Connection to send positions to');
+            return;
+        }
+
+        const seen = ((layer.outgoing?.ephemeral as Record<string, unknown> | undefined)?.[SEEN_KEY] ?? {}) as SeenCallsigns;
+
+        const features = [];
+        for (const track of map.filter((f) => f.properties.class === 'AppTrack')) {
+            const position = appTrackPosition(track, source.AppTracks, seen);
+            if ('skip' in position) {
+                console.log(`ok - skip - App Track ${track.properties.title ?? track.id}: ${position.skip}`);
+            } else {
+                features.push(position);
+            }
+        }
+
+        if (!features.length) return;
+
+        if (dryRun) {
+            console.log(`ok - dry run App Tracks: would send ${features.map((f) => f.properties.callsign).join(', ')} as live positions`);
+            return;
+        }
+
+        // A schema routes the submission to the Connection rather than the Data Sync - with no
+        // Mappings for it every Feature is delivered as CoT. Live positions are not archived
+        await this.submit({ type: 'FeatureCollection', schema: APP_TRACK_SCHEMA, features } as never, { archive: false });
+        console.log(`ok - App Tracks: sent ${features.map((f) => f.properties.callsign).join(', ')} as live positions`);
     }
 
     /**

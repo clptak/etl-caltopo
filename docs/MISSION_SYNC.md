@@ -23,6 +23,7 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | Locking against overlapping runs (`sync:lock`, honoured for 5 minutes) | Done |
 | Deleting from CalTopo (`DELETE /api/v1/map/{map}/{type}/{id}`, signed like a GET) | Done, verified on a real Map |
 | Icon & style translation - marker symbols, line & fill colour / width / opacity, dashed & dotted lines | Done, verified on a real Map |
+| CalTopo App Tracks → live TAK positions on the Connection (`AppTracks` setting, `lib/apptracks.ts`) | Done, verified in AWS |
 | CalTopo → TAK - the Map's own objects sent to the Layer's Data Sync each run | Done, verified - objects land in the Layer's Mission folder once, a resend of unchanged objects adds nothing |
 
 ## Placement rules
@@ -54,6 +55,7 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | 2026-10-23 | A TAK Polygon without a visible fill (ie: probability rings) is written as a closed LineString | CalTopo colours a pattern's dots with the fill, so a transparent fill hid dotted rings. Dotted lines get an opaque fill |
 | 2026-10-23 | Shapes always send `pattern`, `fill` & `fill-opacity`, as `null` when unused | CalTopo merges an edit into the object, so a dropped property would otherwise linger |
 | 2026-10-23 | CalTopo marker symbols map back to TAK through the same icon-configs mappings (first mapping using a symbol wins) | Icons need the matching iconset - WildFire UID `83198b48…` - installed in every CloudTAK & TAK client, or they show a fallback for the CoT type |
+| 2026-10-24 | CalTopo App Tracks are sent as live positions on the Connection, never into the Mission | Ported from the plugin's PLI share service: latest point, callsign lookup (team colour, role, prefix), phone split out, 2 minute stale, NameFilter. Skipped when the last point is older than MaxAge or a TAK client reported the same callsign within MaxAge - the PLI forwarding records seen callsigns in the Layer's outgoing ephemeral, as a Lambda cannot list connected clients |
 | 2026-10-23 | The TAK remark `None` is treated as no description | TAK clients send it for an item without remarks |
 | 2026-10-23 | The CalTopo service account needs UPDATE on a team Map it can see | A Map it can only read (ie: shared by link) rejects every write with `400 Error saving object` - edit links do not apply to the API |
 

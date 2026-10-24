@@ -220,12 +220,13 @@ test('planTakToCalTopo - items from CalTopo are owned by CalTopo: a TAK edit is 
     assert.deepEqual(first.actions.map((a) => a.op), ['adopt']);
 });
 
-test('calTopoToTak - CalTopo sends TAK everything but Folders, geometry-less objects & what the sync created from TAK', () => {
+test('calTopoToTak - CalTopo sends TAK everything but Folders, App Tracks, geometry-less objects & what the sync created from TAK', () => {
     const objects = [
         caltopo('ct-1', 'Drawn in CalTopo'),
         caltopo('tak-1', 'Created from TAK'),
         { id: 'f-1', properties: { class: 'Folder', title: 'Segments' } },
         { id: 'op-1', properties: { class: 'OperationalPeriod', title: 'OP 1' } },
+        { id: 'trk-1', properties: { class: 'AppTrack', title: 'Caltopo Guy' }, geometry: { type: 'LineString', coordinates: [[-111.6, 35.1], [-111.7, 35.2]] } },
     ];
     const links = [
         { tak: 'tak-1', caltopo: 'tak-1', origin: 'tak' as const, takHash: '', caltopoHash: '' },

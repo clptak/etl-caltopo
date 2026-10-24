@@ -439,11 +439,11 @@ export function nextLinks(state: SyncState, tak: MissionFeature[], applied: Acti
 
 /**
  * The CalTopo objects the CalTopo → TAK half sends to the Mission - everything but Folders,
- * objects without geometry and the objects this sync created from TAK, which TAK owns and
- * would otherwise echo back into the Mission
+ * objects without geometry, App Tracks (sent as live positions instead, see lib/apptracks.ts)
+ * and the objects this sync created from TAK, which TAK owns and would otherwise echo back
  */
 export function calTopoToTak(caltopo: CalTopoFeature[], links: Link[]): CalTopoFeature[] {
     const fromTak = new Set(links.filter((l) => l.origin === 'tak').map((l) => l.caltopo));
 
-    return caltopo.filter((f) => !fromTak.has(f.id) && f.properties.class !== 'Folder' && f.geometry);
+    return caltopo.filter((f) => !fromTak.has(f.id) && !['Folder', 'AppTrack'].includes(String(f.properties.class)) && f.geometry);
 }
