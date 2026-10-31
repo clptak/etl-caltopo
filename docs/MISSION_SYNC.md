@@ -25,6 +25,50 @@ Replaces the Node-RED Caltopo ↔ TAK Mission sync with this ETL.
 | Icon & style translation - marker symbols, line & fill colour / width / opacity, dashed & dotted lines | Done, verified on a real Map |
 | CalTopo App Tracks → live TAK positions on the Connection (`AppTracks` setting, `lib/apptracks.ts`) | Done, verified in AWS |
 | CalTopo → TAK - the Map's own objects sent to the Layer's Data Sync each run | Done, verified - objects land in the Layer's Mission folder once, a resend of unchanged objects adds nothing |
+| Per pair status for the plugin (`sync:status`, `lib/status.ts`) | Done, tests only - not yet deployed |
+
+## Pair status (`sync:status`)
+
+Every run, dry runs included, saves the outcome of each pair in the Layer's incoming
+ephemeral store, so the cloudtak-plugin-caltopo-sync UI can show how a pair is doing instead
+of the Node-RED `/sync/health` and `/sync/run` results. The plugin reads it from
+`GET /api/connection/:connection/layer/:layer` → `incoming.ephemeral['sync:status']`, which
+needs a user with access to the Connection (a CloudTAK System Administrator on a
+self-hosted CloudTAK).
+
+```json
+{
+    "at": "2026-10-31T15:40:43.958Z",
+    "pairs": [{
+        "MapId": "APJ7U0R", "MissionGuid": "c66f4e80-…",
+        "at": "2026-10-31T15:40:43.958Z",
+        "ok": true, "dryRun": false,
+        "mission": 12, "caltopo": 15, "linked": 12,
+        "plan": { "update": 1, "skip": 2 },
+        "applied": 1, "failed": 0,
+        "toTak": 3, "appTracks": 1,
+        "errors": []
+    }]
+}
+```
+
+- `pairs` follows the order of `Pairs` in the settings, so a removed pair drops out.
+- `ok: false` comes with one line per failed step in `errors`, ie:
+  - `sync: 401 Invalid Token`, when the Mission or Map could not be read and nothing ran;
+  - `TAK -> CalTopo: 2 writes failed - retried next run`;
+  - `CalTopo -> TAK: …`;
+  - `App Tracks: …`.
+- The counts a step never reached are left out.
+
+**Saving the Layer's settings clears its ephemeral store**, as CloudTAK caches login
+secrets there. That clears the saved links and the status along with it.
+- The next run re-adopts every object by its TAK UID, with its origin recomputed from its
+  Mission folder.
+- An item deleted in TAK between the last run and the save is **not** deleted from CalTopo,
+  as its link is gone.
+- So in phase A, the plugin should write a pair's Layer settings once, when it creates the
+  pair. It should avoid rewriting them, for example on credential rotation, while users are
+  mid-edit.
 
 ## Placement rules
 

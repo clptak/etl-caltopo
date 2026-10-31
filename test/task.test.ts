@@ -527,7 +527,7 @@ test('control - Sync source dry runs each pair with signed map reads and never s
  * Run a writing Mission Sync against the mock CalTopo, carrying the Layer's ephemeral store
  * between runs like CloudTAK does
  */
-async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[], appTracks?: Record<string, unknown>, seen?: Record<string, number>, dataSyncFails?: boolean, submissions?: Array<{ schema?: string, archive?: boolean, features: unknown[] }> } = {}) {
+async function syncRun(base: string, ephemeral: Record<string, unknown>, mission: unknown[], folders: Map<string, string>, mapId = 'MAP1', opts: { data?: number, submitted?: unknown[], appTracks?: Record<string, unknown>, seen?: Record<string, number>, dataSyncFails?: boolean, missionFails?: boolean, submissions?: Array<{ schema?: string, archive?: boolean, features: unknown[] }> } = {}) {
     const task = await Task.init();
     const layer = {
         id: 1,
@@ -546,7 +546,7 @@ async function syncRun(base: string, ephemeral: Record<string, unknown>, mission
     // @ts-expect-error private in base
     task.layer = layer;
     task.client = (verbose: boolean) => new CalTopo({ url: base, verbose });
-    task.missionReader = () => ({ folders: async () => ({ names: folders, ids: new Map() }), features: async () => mission as never });
+    task.missionReader = () => ({ folders: async () => ({ names: folders, ids: new Map() }), features: async () => { if (opts.missionFails) throw new Error('401 Invalid Token'); return mission as never; } });
 
     const saved: Record<string, unknown>[] = [];
     task.setEphemeral = async (ephem: Record<string, unknown>) => { saved.push(structuredClone(ephem)); };
@@ -646,9 +646,56 @@ test('control - a held lock skips the run, a failed write is retried next run', 
         const saved = await syncRun(readonly.base, { 'sync:lock': Date.now() - 10 * 60 * 1000 }, [{ id: 'x', properties: { callsign: 'X' }, geometry: { type: 'Point', coordinates: [0, 0] } }], new Map(), 'READONLY');
 
         assert.deepEqual(readonly.requests.filter((r) => r.method !== 'GET').map((r) => r.pathname), ['/api/v1/map/READONLY/Marker/x']);
-        assert.deepEqual(saved.pop(), { 'sync:READONLY:mission-1': { links: [] } });
+        const last = saved.pop()!;
+        assert.deepEqual(last['sync:READONLY:mission-1'], { links: [] });
+
+        // The failed write is in the pair's status for the plugin to show
+        const status = last['sync:status'] as { at: string, pairs: Array<Record<string, unknown>> };
+        assert.ok(status.at);
+        assert.equal(status.pairs.length, 1);
+        assert.ok(status.pairs[0].at);
+        assert.deepEqual({ ...status.pairs[0], at: undefined }, {
+            MapId: 'READONLY',
+            MissionGuid: 'mission-1',
+            at: undefined,
+            ok: false,
+            dryRun: false,
+            mission: 1,
+            caltopo: 0,
+            linked: 0,
+            plan: { create: 1 },
+            applied: 0,
+            failed: 1,
+            toTak: 0,
+            appTracks: 0,
+            errors: ['TAK -> CalTopo: 1 writes failed - retried next run'],
+        });
     } finally {
         await readonly.close();
+    }
+});
+
+test('control - Sync status records a healthy pair, a dry run and an unreadable Map', async () => {
+    const api = await mock({ map: [{ id: 'ct-1', type: 'Feature', properties: { class: 'Marker', title: 'Helispot' }, geometry: { type: 'Point', coordinates: [-111.6, 35.1] } }] });
+    const mission = [{ id: 'tak-1', properties: { callsign: 'Staging' }, geometry: { type: 'Point', coordinates: [-111.5, 35.0] } }];
+
+    try {
+        const saved = await syncRun(api.base, {}, mission, new Map(), 'MAP1', { data: 7, submitted: [] });
+        const pair = (saved.pop()!['sync:status'] as { pairs: Array<Record<string, unknown>> }).pairs[0];
+        assert.equal(pair.ok, true);
+        assert.deepEqual(pair.errors, []);
+        assert.deepEqual([pair.mission, pair.caltopo, pair.applied, pair.failed, pair.linked, pair.toTak], [1, 1, 1, 0, 1, 1]);
+        assert.deepEqual(pair.plan, { create: 1 });
+
+        // A pair whose Mission can't be read is recorded but its links are left alone
+        const broken = await syncRun(api.base, { 'sync:MAP1:mission-1': { links: [{ tak: 'a', caltopo: 'a', origin: 'tak' }] } }, mission, new Map(), 'MAP1', { missionFails: true });
+        const last = broken.pop()!;
+        const failedPair = (last['sync:status'] as { pairs: Array<Record<string, unknown>> }).pairs[0];
+        assert.equal(failedPair.ok, false);
+        assert.deepEqual(failedPair.errors, ['sync: 401 Invalid Token']);
+        assert.equal((last['sync:MAP1:mission-1'] as { links: unknown[] }).links.length, 1);
+    } finally {
+        await api.close();
     }
 });
 

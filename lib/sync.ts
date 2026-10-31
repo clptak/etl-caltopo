@@ -377,10 +377,16 @@ export function planTakToCalTopo(tak: MissionFeature[], caltopo: CalTopoFeature[
     return { actions, warnings };
 }
 
+/** How many actions of each kind a plan holds */
+export function planCounts(plan: Plan): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const action of plan.actions) counts[action.op] = (counts[action.op] ?? 0) + 1;
+    return counts;
+}
+
 /** One line per action count, ie: "create 3, adopt 2 (1 differ), skip 1" */
 export function summary(plan: Plan): string {
-    const counts = new Map<string, number>();
-    for (const action of plan.actions) counts.set(action.op, (counts.get(action.op) ?? 0) + 1);
+    const counts = new Map(Object.entries(planCounts(plan)));
 
     const differ = plan.actions.filter((a) => a.op === 'adopt' && !a.same).length;
     const conflicts = plan.actions.filter((a) => a.op === 'update' && a.conflict).length;

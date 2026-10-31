@@ -12,7 +12,9 @@ import type { SeenCallsigns } from './lib/apptracks.js';
 import { ProfileTokenReader } from './lib/mission.js';
 import { ICONS } from './lib/style.js';
 import type { MissionReader } from './lib/mission.js';
-import { planTakToCalTopo, summary, describe, nextLinks, calTopoToTak, takOrigin, withOrigins } from './lib/sync.js';
+import { planTakToCalTopo, planCounts, summary, describe, nextLinks, calTopoToTak, takOrigin, withOrigins } from './lib/sync.js';
+import { STATUS_KEY, pairStatus, failed } from './lib/status.js';
+import type { PairStatus, SyncStatus } from './lib/status.js';
 import type { SyncState, Plan, Action, CalTopoWrite } from './lib/sync.js';
 
 const MapSource = Type.Object({
@@ -413,12 +415,14 @@ export default class Task extends ETL {
     /**
      * Sync the TAK → CalTopo half of each Map/Mission pair - or with DryRun only log the plan
      *
-     * The links of a pair are kept in the Layer's ephemeral store under sync:<MapId>:<MissionGuid>
-     * and sync:lock holds the start time of a writing run, so an overlapping run skips
+     * The links of a pair are kept in the Layer's ephemeral store under sync:<MapId>:<MissionGuid>,
+     * sync:lock holds the start time of a writing run, so an overlapping run skips, and
+     * sync:status the outcome of each pair's last run
      */
     async sync(caltopo: CalTopo, source: Static<typeof SyncSource>, verbose: boolean): Promise<void> {
         const reader = this.missionReader(source);
         const ephemeral = { ...((await this.fetchLayer()).incoming?.ephemeral ?? {}) as Record<string, unknown> };
+        const statuses: PairStatus[] = [];
 
         if (!source.DryRun) {
             const lock = Number(ephemeral[SYNC_LOCK]);
@@ -435,6 +439,8 @@ export default class Task extends ETL {
                 const key = `sync:${pair.MapId}:${pair.MissionGuid}`;
                 const label = `${source.DryRun ? 'dry run' : 'sync'} ${pair.MissionGuid} -> ${pair.MapId}`;
                 const state = (ephemeral[key] as SyncState | undefined) ?? { links: [] };
+                const status = pairStatus(pair, source.DryRun);
+                statuses.push(status);
 
                 try {
                     // Every source is read even when one fails, so one run reports every broken credential
@@ -459,13 +465,14 @@ export default class Task extends ETL {
 
                     const plan = planTakToCalTopo(mission, map, state, folders.names);
 
+                    Object.assign(status, { mission: mission.length, caltopo: map.length, linked: state.links.length, plan: planCounts(plan) });
                     console.log(`ok - ${label}: ${mission.length} Mission items, ${map.length} CalTopo objects, ${state.links.length} linked - ${summary(plan)}`);
                     for (const warning of plan.warnings) console.log(`warn - ${warning}`);
 
                     if (source.DryRun) {
                         if (verbose) for (const action of plan.actions) console.log(`  ${describe(action)}`);
-                        await this.toTak(source, map, state.links, true);
-                        await this.appTracks(source, map, true);
+                        status.toTak = await this.toTak(source, map, state.links, true);
+                        status.appTracks = await this.appTracks(source, map, true);
                         continue;
                     }
 
@@ -473,22 +480,27 @@ export default class Task extends ETL {
                     const links = nextLinks(state, mission, applied, origin);
                     ephemeral[key] = { links } satisfies SyncState;
 
-                    const failed = plan.actions.filter((a) => a.op !== 'skip').length - applied.filter((a) => a.op !== 'skip').length;
-                    console.log(`ok - ${label}: applied ${applied.filter((a) => a.op !== 'skip').length}${failed ? `, ${failed} failed - retried next run` : ''}`);
+                    status.applied = applied.filter((a) => a.op !== 'skip').length;
+                    status.failed = plan.actions.filter((a) => a.op !== 'skip').length - status.applied;
+                    status.linked = links.length;
+                    if (status.failed) failed(status, 'TAK -> CalTopo', `${status.failed} writes failed - retried next run`);
+                    console.log(`ok - ${label}: applied ${status.applied}${status.failed ? `, ${status.failed} failed - retried next run` : ''}`);
 
                     // Each half is independent - a rejected CalTopo object must not hold back live positions
-                    await this.guarded(`${label} CalTopo -> TAK`, () => this.toTak(source, map, links, false));
-                    await this.guarded(`${label} App Tracks`, () => this.appTracks(source, map, false));
+                    status.toTak = await this.guarded(label, 'CalTopo -> TAK', status, () => this.toTak(source, map, links, false));
+                    status.appTracks = await this.guarded(label, 'App Tracks', status, () => this.appTracks(source, map, false));
                 } catch (err) {
                     // One broken pair must not stop the others
+                    failed(status, 'sync', err);
                     console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
+                } finally {
+                    status.at = new Date().toISOString();
                 }
             }
         } finally {
-            if (!source.DryRun) {
-                delete ephemeral[SYNC_LOCK];
-                await this.setEphemeral(ephemeral, DataFlowType.Incoming);
-            }
+            if (!source.DryRun) delete ephemeral[SYNC_LOCK];
+            ephemeral[STATUS_KEY] = { at: new Date().toISOString(), pairs: statuses } satisfies SyncStatus;
+            await this.setEphemeral(ephemeral, DataFlowType.Incoming);
         }
     }
 
@@ -498,16 +510,16 @@ export default class Task extends ETL {
      * ones that disappear. Without a Data Sync a submission would be broadcast to the Connection
      * instead, and with several pairs their Maps would share one Mission, so both are refused
      */
-    async toTak(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, links: SyncState['links'], dryRun: boolean): Promise<void> {
+    async toTak(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, links: SyncState['links'], dryRun: boolean): Promise<number> {
         const layer = await this.fetchLayer();
         const data = (layer.incoming as { data?: number | null } | undefined)?.data;
 
         if (!data) {
             console.log('ok - skip - CalTopo -> TAK: the Layer has no Data Sync');
-            return;
+            return 0;
         } else if (source.Pairs.length !== 1) {
             console.log(`ok - skip - CalTopo -> TAK: a Layer's Data Sync is one Mission, so it needs exactly one pair, not ${source.Pairs.length}`);
-            return;
+            return 0;
         }
 
         const objects = calTopoToTak(map, links);
@@ -515,19 +527,22 @@ export default class Task extends ETL {
 
         if (dryRun) {
             console.log(`ok - dry run CalTopo -> TAK: would send ${features.length} CalTopo objects to Data Sync ${data}`);
-            return;
+            return features.length;
         }
 
         await this.submit({ type: 'FeatureCollection', features });
         console.log(`ok - CalTopo -> TAK: sent ${features.length} CalTopo objects to Data Sync ${data}`);
+        return features.length;
     }
 
-    /** Run one step of a sync, logging rather than throwing its failure */
-    async guarded(label: string, step: () => Promise<void>): Promise<void> {
+    /** Run one step of a sync, recording rather than throwing its failure */
+    async guarded<T>(label: string, name: string, status: PairStatus, step: () => Promise<T>): Promise<T | undefined> {
         try {
-            await step();
+            return await step();
         } catch (err) {
-            console.error(`not ok - ${label}:`, err instanceof Error ? err.message : String(err));
+            failed(status, name, err);
+            console.error(`not ok - ${label} ${name}:`, err instanceof Error ? err.message : String(err));
+            return undefined;
         }
     }
 
@@ -537,13 +552,13 @@ export default class Task extends ETL {
      * on their own rather than sitting in the Mission. A callsign the PLI forwarding recently saw
      * from a TAK client is skipped, as that person already shows as themselves
      */
-    async appTracks(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, dryRun: boolean): Promise<void> {
-        if (!source.AppTracks) return;
+    async appTracks(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, dryRun: boolean): Promise<number> {
+        if (!source.AppTracks) return 0;
 
         const layer = await this.fetchLayer();
         if (!layer.connection) {
             console.log('ok - skip - App Tracks: the Layer has no Connection to send positions to');
-            return;
+            return 0;
         }
 
         const seen = ((layer.outgoing?.ephemeral as Record<string, unknown> | undefined)?.[SEEN_KEY] ?? {}) as SeenCallsigns;
@@ -558,17 +573,18 @@ export default class Task extends ETL {
             }
         }
 
-        if (!features.length) return;
+        if (!features.length) return 0;
 
         if (dryRun) {
             console.log(`ok - dry run App Tracks: would send ${features.map((f) => f.properties.callsign).join(', ')} as live positions`);
-            return;
+            return features.length;
         }
 
         // A schema routes the submission to the Connection rather than the Data Sync - with no
         // Mappings for it every Feature is delivered as CoT. Live positions are not archived
         await this.submit({ type: 'FeatureCollection', schema: APP_TRACK_SCHEMA, features } as never, { archive: false });
         console.log(`ok - App Tracks: sent ${features.map((f) => f.properties.callsign).join(', ')} as live positions`);
+        return features.length;
     }
 
     /**
