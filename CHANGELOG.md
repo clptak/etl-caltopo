@@ -10,6 +10,10 @@
 
 ## Version History
 
+### v5.19.0
+
+- :tada: `event:create` only creates a CalTopo Map for CoreEvents flagged `metadata.caltopo_map: true` - set `MapEvents` to `All` for the old behaviour
+
 ### v5.18.1
 
 - :bug: CalTopo marker colours stored with a `#` were sent to CloudTAK as `##RRGGBB`, which rejected those Features (`400 - Submitted`)

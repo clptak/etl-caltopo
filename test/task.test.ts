@@ -190,7 +190,7 @@ test('control - Map source & legacy ShareId env fetch the public map', async () 
 
 type Fetched = { url: string, method: string, body: unknown };
 
-type Current = { links?: unknown[], external_ids?: Record<string, string> };
+type Current = { links?: unknown[], external_ids?: Record<string, string>, metadata?: Record<string, unknown> };
 
 /**
  * Run the outgoing handler against a mock CalTopo & a stubbed CloudTAK
@@ -229,7 +229,7 @@ async function outgoing(base: string, environment: Record<string, unknown>, reco
         }
 
         if (!opts.current) throw new Error('403 Forbidden');
-        return { ...EVENT, links: opts.current.links ?? [], external_ids: opts.current.external_ids ?? {} };
+        return { ...EVENT, links: opts.current.links ?? [], external_ids: opts.current.external_ids ?? {}, metadata: opts.current.metadata ?? EVENT.metadata };
     };
 
     await task.outgoing({ Records: records.map((body) => ({ body: JSON.stringify(body) })) } as never);
@@ -245,6 +245,7 @@ const EVENT = {
     location: 'Bear Lake Trailhead, CO',
     links: [],
     external_ids: {},
+    metadata: { caltopo_map: true },
     geometry: { type: 'Point', coordinates: [-105.6, 40.3, 2900] }
 };
 
@@ -256,8 +257,10 @@ test('Outgoing schema - Team Account, credentials & map defaults', async () => {
     const task = await Task.init();
     const schema = await task.schema(SchemaType.Input, DataFlowType.Outgoing);
 
-    assert.deepEqual(Object.keys(schema.properties), ['AccountId', 'TeamId', 'CredentialId', 'CredentialSecret', 'MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'PLI', 'DEBUG']);
-    assert.deepEqual(schema.required, ['MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'DEBUG']);
+    assert.deepEqual(Object.keys(schema.properties), ['AccountId', 'TeamId', 'CredentialId', 'CredentialSecret', 'MapEvents', 'MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'PLI', 'DEBUG']);
+    assert.deepEqual(schema.required, ['MapEvents', 'MapMode', 'MapSharing', 'MapLayers', 'MarkerColor', 'DEBUG']);
+    assert.equal(schema.properties.MapEvents.default, 'Flagged');
+    assert.deepEqual(schema.properties.MapEvents.enum, ['Flagged', 'All']);
     assert.equal(schema.properties.MapMode.default, 'sar');
     assert.deepEqual(schema.properties.MapMode.enum, ['sar', 'cal']);
     assert.equal(schema.properties.MapSharing.default, 'SECRET');
@@ -346,6 +349,25 @@ test('outgoing - an Event that already has a caltopo external ID never gets a se
 
         assert.equal(api.requests.length, 0);
         assert.deepEqual(res.fetched.map((f) => `${f.method} ${f.url}`), ['GET /api/core/event/evt-1']);
+    } finally {
+        await api.close();
+    }
+});
+
+test('outgoing - only Events flagged caltopo_map get a map, unless MapEvents is All', async () => {
+    const api = await mock({ mapId: 'MAP1' });
+
+    try {
+        // An incident or field team Event from another plugin
+        for (const metadata of [{}, { caltopo_map: 'yes' }]) {
+            const res = await outgoing(api.base, OUTGOING, [CREATE], { current: { metadata } });
+            assert.equal(api.requests.length, 0);
+            assert.deepEqual(res.fetched.map((f) => `${f.method} ${f.url}`), ['GET /api/core/event/evt-1']);
+        }
+
+        const all = await outgoing(api.base, { ...OUTGOING, MapEvents: 'All' }, [CREATE], { current: { metadata: {} } });
+        assert.ok(api.requests.length > 0);
+        assert.ok(all.fetched.some((f) => f.method === 'PATCH'));
     } finally {
         await api.close();
     }

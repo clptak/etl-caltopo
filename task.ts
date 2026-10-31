@@ -98,6 +98,15 @@ const LegacyEnv = Type.Object({
     'DEBUG': Type.Boolean({ default: false })
 });
 
+/** The CoreEvent metadata key that asks for a CalTopo Map - set by the CalTopo Sync plugin */
+export const MAP_FLAG = 'caltopo_map';
+
+/** Which created CoreEvents get a CalTopo Map */
+export enum MapEvents {
+    FLAGGED = 'Flagged',
+    ALL = 'All',
+}
+
 // The Team Account fields are only required by event:create, so a PLI only Layer can leave them blank
 const OutgoingEnv = Type.Composite([
     Type.Partial(Type.Object({
@@ -111,6 +120,11 @@ const OutgoingEnv = Type.Composite([
     Type.Partial(Credentials),
     Type.Object({
         // Declared with enum rather than Type.Enum so the Layer environment UI renders a select
+        MapEvents: Type.Unsafe<MapEvents>(Type.String({
+            enum: Object.values(MapEvents),
+            default: MapEvents.FLAGGED,
+            description: `Which created CoreEvents get a CalTopo Map - Flagged (only Events whose metadata has ${MAP_FLAG}: true, as the CalTopo Sync plugin sets) or All`
+        })),
         MapMode: Type.Unsafe<MapMode>(Type.String({
             enum: Object.values(MapMode),
             default: MapMode.SAR,
@@ -138,7 +152,7 @@ const OutgoingEnv = Type.Composite([
         })
     })
 ], {
-    description: 'event:create - creates a CalTopo Map in the Team Account for every CoreEvent created, the Map ID is filed under the caltopo external ID of the Event, which requires the event:read & event:update permissions. feature:* - forwards TAK positions to CalTopo Trackable Devices when PLI is configured'
+    description: 'event:create - creates a CalTopo Map in the Team Account for each CoreEvent created (only flagged ones unless MapEvents is All), the Map ID is filed under the caltopo external ID of the Event, which requires the event:read & event:update permissions. feature:* - forwards TAK positions to CalTopo Trackable Devices when PLI is configured'
 });
 
 /** The CoreEvent external ID system the created Map ID is filed under */
@@ -151,6 +165,7 @@ export const CoreEvent = Type.Object({
     remarks: Type.Optional(Type.String()),
     location: Type.Optional(Type.String()),
     external_ids: Type.Optional(Type.Record(Type.String(), Type.String())),
+    metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     links: Type.Optional(Type.Array(Type.Object({
         name: Type.String(),
         url: Type.String()
@@ -224,6 +239,13 @@ export default class Task extends ETL {
             const known = core.external_ids?.[EXTERNAL_SYSTEM];
             if (known) {
                 console.log(`ok - skip - event ${core.id} already has map ${known}`);
+                continue;
+            }
+
+            // Other plugins create Events too (an incident, each OP's field team) - only those asking
+            // for a Map get one, unless the Layer is set to map every Event
+            if (env.MapEvents !== MapEvents.ALL && core.metadata?.[MAP_FLAG] !== true) {
+                if (env.DEBUG) console.log(`ok - skip - event ${core.id} is not flagged ${MAP_FLAG}`);
                 continue;
             }
 
