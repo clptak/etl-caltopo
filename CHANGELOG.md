@@ -10,6 +10,14 @@
 
 ## Version History
 
+### v5.18.1
+
+- :bug: CalTopo marker colours stored with a `#` were sent to CloudTAK as `##RRGGBB`, which rejected those Features (`400 - Submitted`)
+
+### v5.18.0
+
+- :tada: Save each pair's last Sync status (`sync:status`) in the Layer's ephemeral store for the plugin
+
 ### v5.17.0
 
 - :arrow_up: Update Core Dependencies

@@ -747,9 +747,12 @@ export default class Task extends ETL {
                     if (icon?.type) feat.properties.type = icon.type;
                     if (icon?.icon) feat.properties.icon = icon.icon;
 
-                    if (metadata['marker-color']) {
-                        feat.properties['marker-color'] = `#${metadata['marker-color']}`;
-                        delete metadata['marker-color'];
+                    // CalTopo stores colours with and without the # - CloudTAK rejects a whole
+                    // Feature whose colour it cannot parse, so anything else is left out
+                    const color = String(metadata['marker-color'] ?? '').match(/^#?([0-9a-f]{6})$/i);
+                    delete metadata['marker-color'];
+                    if (color) {
+                        feat.properties['marker-color'] = `#${color[1].toUpperCase()}`;
                         feat.properties['marker-opacity'] = 1;
                     }
                 }

@@ -86,6 +86,16 @@ test('fromLocations - current position, stale filter, callsign & course', async 
     assert.equal(features[1].properties.stale, new Date(now + 55_000).toISOString());
 });
 
+test('fromMap - marker colours with or without # become one #RRGGBB, others are left out', async () => {
+    const task = await Task.init();
+    const marker = (id: string, color: unknown) => ({ id, type: 'Feature', properties: { title: id, class: 'Marker', creator: 'x', updated: 1, 'marker-color': color }, geometry: { type: 'Point', coordinates: [-105, 39] } });
+
+    const features = task.fromMap([marker('plain', 'ff0000'), marker('hashed', '#FFFFFF'), marker('named', 'red'), marker('none', null)] as never);
+    assert.deepEqual(features.map((f) => f.properties['marker-color']), ['#FF0000', '#FFFFFF', undefined, undefined]);
+    assert.deepEqual(features.map((f) => f.properties['marker-opacity']), [1, 1, undefined, undefined]);
+    assert.ok(features.every((f) => f.properties.metadata?.['marker-color'] === undefined));
+});
+
 test('fromMap - folders become paths, markers styled, geometry-less objects dropped', async () => {
     const task = await Task.init();
 
