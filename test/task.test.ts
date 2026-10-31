@@ -6,10 +6,12 @@ import type { Feature } from '@tak-ps/node-cot';
 import CalTopo, { LOCATION_TTL } from '../lib/caltopo.js';
 import { mock, CREDS } from './mock.js';
 
-// task.ts calls Task.init() at module scope which requires an ETL environment
-process.env.ETL_API = process.env.ETL_API || 'http://localhost:5001';
-process.env.ETL_LAYER = process.env.ETL_LAYER || '1';
-process.env.ETL_TOKEN = process.env.ETL_TOKEN || 'etl.test-token';
+// task.ts calls Task.init() at module scope which requires an ETL environment. It is
+// always a dead address, never one from the shell or .env: a call a test forgets to stub
+// must fail rather than write to a real CloudTAK
+process.env.ETL_API = 'http://127.0.0.1:9';
+process.env.ETL_LAYER = '1';
+process.env.ETL_TOKEN = 'etl.test-token';
 
 const { default: Task } = await import('../task.js');
 
@@ -508,8 +510,15 @@ test('control - Sync source dry runs each pair with signed map reads and never s
 
         let submitted = false;
         task.submit = async () => { submitted = true; return true; };
+        const saved: Record<string, unknown>[] = [];
+        task.setEphemeral = async (ephem: Record<string, unknown>) => { saved.push(structuredClone(ephem)); };
 
         await task.control();
+
+        // A dry run saves only its status - no lock, no links
+        assert.equal(saved.length, 1);
+        assert.deepEqual(Object.keys(saved[0]), ['sync:status']);
+        assert.equal((saved[0]['sync:status'] as { pairs: Array<{ dryRun: boolean }> }).pairs[0].dryRun, true);
 
         assert.deepEqual(read, ['mission-1']);
         assert.deepEqual(api.requests.map((r) => r.pathname), ['/api/v1/map/MAP1/since/0']);
