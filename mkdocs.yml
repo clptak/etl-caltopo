@@ -1,0 +1,52 @@
+site_name: ETL-CalTopo
+site_description: Bring CalTopo maps into the TAK System through CloudTAK
+repo_url: https://github.com/clptak/etl-caltopo
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+
+nav:
+  - Overview: index.md
+  - First-time setup:
+      - Set up CloudTAK and the first pair: setup.md
+      - CalTopo credentials: credentials.md
+  - Using it:
+      - With the CalTopo Sync plugin: plugin.md
+      - Pairing by hand (no plugin): ADMIN_PAIRING.md
+      - Creating CalTopo maps from CloudTAK: map-creation.md
+      - TAK positions to CalTopo (PLI): pli.md
+  - Operations:
+      - Updating to a new version: updating.md
+      - AWS cheat sheet: AWS_CHEATSHEET.md
+  - Reference:
+      - Mission Sync design notes: MISSION_SYNC.md
+  - Development:
+      - Building and running: development.md
+      - Running against a dev CloudTAK: LOCAL_DEV.md

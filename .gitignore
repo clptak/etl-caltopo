@@ -108,3 +108,6 @@ dist
 .outgoing-env.json
 # Local Incoming settings for scripts/dev-layer.sh - holds credentials
 .incoming-env.json
+
+# MkDocs build output
+site/

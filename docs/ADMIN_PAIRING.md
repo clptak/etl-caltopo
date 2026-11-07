@@ -1,20 +1,21 @@
 # Pairing an existing TAK Mission with a CalTopo Map
 
-For a CloudTAK administrator, through the CloudTAK web UI. Use this when the
-cloudtak-plugin-caltopo-sync plugin isn't creating the pair for you. In the steps, *Map* means
+For a CloudTAK administrator, through the CloudTAK web UI. Use this for each pair when you
+don't use the [CalTopo Sync plugin](plugin.md). [Set up](setup.md) walks through the same
+steps for a brand-new CloudTAK. In the steps, *Map* means
 the CalTopo map and *Mission* means the TAK Mission.
 
-> **Two rules that can't be undone**
-> - **Never turn Mission Sync off on a Data Sync, and never delete a Data Sync.** CloudTAK
->   **deletes the TAK Mission** when you do either. To stop syncing, disable or delete the
->   **Layer** instead (step 8).
-> - **CalTopo has no undo.** Always do the dry run (step 6) before letting the Layer write.
+!!! danger "Two rules that can't be undone"
+    - **Never turn Mission Sync off on a Data Sync, and never delete a Data Sync.** CloudTAK
+      **deletes the TAK Mission** when you do either. To stop syncing, disable or delete the
+      **Layer** instead (step 8).
+    - **CalTopo has no undo.** Always do the dry run (step 6) before letting the Layer write.
 
-## Once per CloudTAK (already done on map.clpdevtak.com)
+## Once per CloudTAK
 
 | What | Where | Check |
 |---|---|---|
-| AWS stack + CloudTAK AWS settings | `deploy/README.md` | Admin → Integrations lists **CalTopo** |
+| AWS stack + CloudTAK AWS settings | [Set up](setup.md) Parts 1–2 and [`deploy/README.md`](https://github.com/clptak/etl-caltopo/blob/main/deploy/README.md) | Admin → Integrations lists **CalTopo** |
 | A Connection for the team | Connections → `+` → **User Login** with the LDAP service account → Generate Certificate → Save Connection | The Connection shows green |
 | An API token for the service account | Log in as the service account → Settings → **API Tokens** (`/menu/settings/tokens`) | Make it on **this** CloudTAK. A token from another CloudTAK fails with `Invalid Token` |
 | CalTopo service account | CalTopo team admin | The account needs **UPDATE** on the team. Without it, every write fails with `400 Error saving object` |
@@ -60,6 +61,8 @@ Connections → the team Connection → **Layers** → `+`:
   items gets this name. **Don't rename the Layer later** (see Troubleshooting).
 - **Task**: CalTopo, latest version
 - **Memory**: 256 MB or more (it uses about 175 MB)
+- **Permissions**: tick all of them – `feature:*`, `event:read`, `event:update`. They can't be
+  added later from the UI.
 - **Schedule**: `rate(1 minute)`
 - Leave it **Disabled** for now if the form offers that option.
 
