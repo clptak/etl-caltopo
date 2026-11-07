@@ -3,8 +3,8 @@
 Bring CalTopo maps into the TAK System – and TAK back into CalTopo – through
 [CloudTAK](https://github.com/dfpc-coe/CloudTAK).
 
-**📖 Documentation:** the full guide is in [`docs/`](docs/index.md) and builds into a site with
-MkDocs – see [Building and running › These docs](docs/development.md#these-docs).
+**📖 Documentation: <https://clptak.github.io/etl-caltopo/>** – the full guide, built from
+[`docs/`](docs/index.md) with MkDocs (see [Building and running › These docs](docs/development.md#these-docs)).
 
 ## What it does
 
