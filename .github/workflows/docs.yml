@@ -1,15 +1,17 @@
 name: Docs
 
 # Builds the MkDocs site in docs/ and publishes it to GitHub Pages.
+# Runs on the deploy branch (main stays a clean copy of upstream).
 # Needs Settings → Pages → Source: "GitHub Actions" on the repository.
 
 on:
   push:
-    branches: [main]
+    branches: [deploy]
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
