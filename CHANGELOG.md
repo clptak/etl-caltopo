@@ -10,6 +10,10 @@
 
 ## Version History
 
+### Unreleased
+
+- :arrow_up: Update Core Dependencies - merged from dfpc-coe v5.18.0
+
 ### v5.19.1
 
 - :bug: A CalTopo polygon whose outline almost closes is closed before it is sent - CloudTAK rejected it (`400 - Submitted`)
