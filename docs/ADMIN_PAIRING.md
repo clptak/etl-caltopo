@@ -77,20 +77,22 @@ values, and Save. Type the secrets in yourself. Never send them by email or chat
 
 ```json
 {
-    "Source": "Sync",
-    "CredentialId": "<CalTopo service account credential id>",
-    "CredentialSecret": "<CalTopo service account secret>",
-    "MissionToken": "<API token from /menu/settings/tokens>",
-    "Pairs": [
-        { "MapId": "APJ7U0R", "MissionGuid": "<Mission GUID>" }
-    ],
-    "DryRun": true,
-    "AppTracks": {
-        "MaxAge": 600,
-        "GroupName": "Orange",
-        "Role": "Team Member",
-        "CallsignLookup": [],
-        "NameFilter": []
+    "Source": {
+        "Mode": "Sync",
+        "CredentialId": "<CalTopo service account credential id>",
+        "CredentialSecret": "<CalTopo service account secret>",
+        "MissionToken": "<API token from /menu/settings/tokens>",
+        "Pairs": [
+            { "MapId": "APJ7U0R", "MissionGuid": "<Mission GUID>" }
+        ],
+        "DryRun": true,
+        "AppTracks": {
+            "MaxAge": 600,
+            "GroupName": "Orange",
+            "Role": "Team Member",
+            "CallsignLookup": [],
+            "NameFilter": []
+        }
     },
     "DEBUG": true
 }
@@ -115,7 +117,7 @@ Things to check:
 
 ### 7. Go live
 
-Change `"DryRun": true` to `false` in Raw View and Save. On the next run (≤ 1 minute):
+Change `"DryRun": true` (inside `Source`) to `false` in Raw View and Save. On the next run (≤ 1 minute):
 
 - **On the Map:** TAK items appear as follows.
   - Segments go in a *Segments* folder.
