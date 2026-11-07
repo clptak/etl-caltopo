@@ -25,7 +25,15 @@ export type PairStatus = {
     /** CalTopo objects sent to the Mission and App Tracks sent as positions */
     toTak?: number;
     appTracks?: number;
+    /** CalTopo objects CloudTAK would reject, so they are not in the Mission - and why */
+    notSent?: NotSent[];
     errors: string[];
+};
+
+export type NotSent = {
+    id: string;
+    title: string;
+    reason: string;
 };
 
 export type SyncStatus = {

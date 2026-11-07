@@ -10,6 +10,13 @@
 
 ## Version History
 
+### v5.19.1
+
+- :bug: A CalTopo polygon whose outline almost closes is closed before it is sent - CloudTAK rejected it (`400 - Submitted`)
+- :rocket: CalTopo objects CloudTAK would reject are kept back and listed by name & reason in the pair status (`notSent`), so the rest arrive without an error
+- :bug: TAK positions without a GPS fix (0,0) are no longer forwarded to CalTopo, which refused them every few seconds
+- :arrow_up: `@tak-ps/node-cot` 14.56.0, matching CloudTAK
+
 ### v5.19.0
 
 - :tada: `event:create` only creates a CalTopo Map for CoreEvents flagged `metadata.caltopo_map: true` - set `MapEvents` to `All` for the old behaviour

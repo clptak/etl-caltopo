@@ -71,7 +71,9 @@ export function positionReport(
     });
     if (!rule) return { skip: `callsign ${callsign} matches no Connect Key rule` };
 
+    // A TAK client without a GPS fix reports 0,0 - CalTopo refuses it ("Report uses null location")
     const [lng, lat] = feature.geometry.coordinates as number[];
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) return { skip: 'no GPS fix' };
 
     return { rule, id: callsign, lat, lng };
 }

@@ -72,6 +72,8 @@ test('positionReport - only fresh TAK client positions are forwarded', () => {
         report(pli('CCSO-SAR 1', {}, { type: 'LineString', coordinates: [[0, 0], [1, 1]] })),
         { skip: 'LineString is not a Point' },
     );
+    assert.deepEqual(report(pli('CCSO-SAR 1', {}, { type: 'Point', coordinates: [0, 0, 0] })), { skip: 'no GPS fix' });
+    assert.deepEqual(report(pli('CCSO-SAR 1', {}, { type: 'Point', coordinates: [Number.NaN, 40] })), { skip: 'no GPS fix' });
 
     // A TAK version block marks a TAK client as well as battery status
     assert.ok(!('skip' in report(pli('CCSO-SAR 1', { status: undefined, takv: { platform: 'ATAK-CIV' } }))));

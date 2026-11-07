@@ -1,6 +1,6 @@
 import { Type, TSchema, Static } from '@sinclair/typebox';
 import type Lambda from 'aws-lambda';
-import { Feature } from '@tak-ps/node-cot';
+import { Feature, CoTParser } from '@tak-ps/node-cot';
 import type { Event, OutgoingFeatureMessage } from '@tak-ps/etl';
 import ETL, { SchemaType, handler as internal, local, DataFlowType, InvocationType, OutgoingMessageType, OutgoingAction } from '@tak-ps/etl';
 import { coordEach } from '@turf/meta';
@@ -14,7 +14,7 @@ import { ICONS } from './lib/style.js';
 import type { MissionReader } from './lib/mission.js';
 import { planTakToCalTopo, planCounts, summary, describe, nextLinks, calTopoToTak, takOrigin, withOrigins } from './lib/sync.js';
 import { STATUS_KEY, pairStatus, failed } from './lib/status.js';
-import type { PairStatus, SyncStatus } from './lib/status.js';
+import type { PairStatus, SyncStatus, NotSent } from './lib/status.js';
 import type { SyncState, Plan, Action, CalTopoWrite } from './lib/sync.js';
 
 const MapSource = Type.Object({
@@ -493,7 +493,7 @@ export default class Task extends ETL {
 
                     if (source.DryRun) {
                         if (verbose) for (const action of plan.actions) console.log(`  ${describe(action)}`);
-                        status.toTak = await this.toTak(source, map, state.links, true);
+                        Object.assign(status, await this.toTak(source, map, state.links, true));
                         status.appTracks = await this.appTracks(source, map, true);
                         continue;
                     }
@@ -509,7 +509,7 @@ export default class Task extends ETL {
                     console.log(`ok - ${label}: applied ${status.applied}${status.failed ? `, ${status.failed} failed - retried next run` : ''}`);
 
                     // Each half is independent - a rejected CalTopo object must not hold back live positions
-                    status.toTak = await this.guarded(label, 'CalTopo -> TAK', status, () => this.toTak(source, map, links, false));
+                    Object.assign(status, await this.guarded(label, 'CalTopo -> TAK', status, () => this.toTak(source, map, links, false)));
                     status.appTracks = await this.guarded(label, 'App Tracks', status, () => this.appTracks(source, map, false));
                 } catch (err) {
                     // One broken pair must not stop the others
@@ -532,29 +532,51 @@ export default class Task extends ETL {
      * ones that disappear. Without a Data Sync a submission would be broadcast to the Connection
      * instead, and with several pairs their Maps would share one Mission, so both are refused
      */
-    async toTak(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, links: SyncState['links'], dryRun: boolean): Promise<number> {
+    async toTak(source: Static<typeof SyncSource>, map: Awaited<ReturnType<CalTopo['teamMap']>>, links: SyncState['links'], dryRun: boolean): Promise<{ toTak: number, notSent?: NotSent[] }> {
         const layer = await this.fetchLayer();
         const data = (layer.incoming as { data?: number | null } | undefined)?.data;
 
         if (!data) {
             console.log('ok - skip - CalTopo -> TAK: the Layer has no Data Sync');
-            return 0;
+            return { toTak: 0 };
         } else if (source.Pairs.length !== 1) {
             console.log(`ok - skip - CalTopo -> TAK: a Layer's Data Sync is one Mission, so it needs exactly one pair, not ${source.Pairs.length}`);
-            return 0;
+            return { toTak: 0 };
         }
 
         const objects = calTopoToTak(map, links);
-        const features = this.fromMap(objects as Static<typeof MapFeature>[]);
+        const { features, notSent } = await Task.sendable(this.fromMap(objects as Static<typeof MapFeature>[]));
+        for (const skip of notSent) console.log(`warn - CalTopo -> TAK: not sent ${skip.title} (${skip.id}): ${skip.reason}`);
 
         if (dryRun) {
             console.log(`ok - dry run CalTopo -> TAK: would send ${features.length} CalTopo objects to Data Sync ${data}`);
-            return features.length;
+            return { toTak: features.length, ...(notSent.length ? { notSent } : {}) };
         }
 
         await this.submit({ type: 'FeatureCollection', features });
         console.log(`ok - CalTopo -> TAK: sent ${features.length} CalTopo objects to Data Sync ${data}`);
-        return features.length;
+        return { toTak: features.length, ...(notSent.length ? { notSent } : {}) };
+    }
+
+    /**
+     * Split the Features CloudTAK accepts from those it would reject - CloudTAK turns each into a
+     * CoT the same way, and a rejected one only shows as a 400 for the whole submission, so they
+     * are kept back and listed by name instead
+     */
+    static async sendable(features: Static<typeof Feature.InputFeature>[]): Promise<{ features: Static<typeof Feature.InputFeature>[], notSent: NotSent[] }> {
+        const sendable: Static<typeof Feature.InputFeature>[] = [];
+        const notSent: NotSent[] = [];
+
+        for (const feat of features) {
+            try {
+                await CoTParser.from_geojson(feat as Static<typeof Feature.Feature>);
+                sendable.push(feat);
+            } catch (err) {
+                notSent.push({ id: String(feat.id), title: feat.properties.callsign || String(feat.id), reason: err instanceof Error ? err.message : String(err) });
+            }
+        }
+
+        return { features: sendable, notSent };
     }
 
     /** Run one step of a sync, recording rather than throwing its failure */
@@ -760,6 +782,15 @@ export default class Task extends ETL {
                     return coord.splice(3)
                 });
 
+                // CalTopo can store a polygon ring whose last point is not its first, which
+                // CloudTAK rejects - losing that object - so open rings are closed
+                if (feat.geometry.type === 'Polygon') {
+                    for (const ring of feat.geometry.coordinates) {
+                        const [first, last] = [ring[0], ring[ring.length - 1]];
+                        if (first && last && (first[0] !== last[0] || first[1] !== last[1])) ring.push([...first]);
+                    }
+                }
+
                 feat.properties.archived = true;
                 if (feat.geometry.type === 'Point') {
                     feat.properties.type = 'u-d-p';
@@ -780,6 +811,12 @@ export default class Task extends ETL {
                 }
 
                 return feat;
+            })
+            // A ring needs 4 positions (a triangle, closed) - anything less is no polygon
+            .filter((feat) => {
+                if (feat.geometry.type !== 'Polygon' || feat.geometry.coordinates.every((ring) => ring.length >= 4)) return true;
+                console.log(`ok - skip - ${feat.properties.callsign} (${feat.id}): a polygon needs at least 3 points`);
+                return false;
             })
             // After all Features/Folders have been seperated, apply folder => path transform
             .map((feat) => {

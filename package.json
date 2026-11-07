@@ -2,7 +2,7 @@
     "name": "coe-caltopo",
     "type": "module",
     "prviate": true,
-    "version": "5.19.0",
+    "version": "5.19.1",
     "description": "",
     "main": "index.js",
     "scripts": {
@@ -26,6 +26,7 @@
     "dependencies": {
         "@sinclair/typebox": "^0.34.0",
         "@tak-ps/etl": "^10.0.0",
+        "@tak-ps/node-cot": "^14.56.0",
         "@turf/meta": "^7.0.0",
         "@types/geojson": "^7946.0.10"
     }

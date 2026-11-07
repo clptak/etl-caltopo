@@ -96,6 +96,36 @@ test('fromMap - marker colours with or without # become one #RRGGBB, others are 
     assert.ok(features.every((f) => f.properties.metadata?.['marker-color'] === undefined));
 });
 
+test('fromMap - open polygon rings are closed, polygons of under 3 points dropped', async () => {
+    const task = await Task.init();
+    const shape = (id: string, ring: number[][]) => ({ id, type: 'Feature', properties: { title: id, class: 'Shape', creator: 'x', updated: 1 }, geometry: { type: 'Polygon', coordinates: [ring] } });
+
+    const features = task.fromMap([
+        shape('open', [[-105, 39, 0, 1], [-104, 39], [-104, 40], [-105.001, 39.001]]),
+        shape('closed', [[-105, 39], [-104, 39], [-104, 40], [-105, 39]]),
+        shape('line', [[-105, 39], [-104, 39]]),
+    ] as never);
+
+    assert.deepEqual(features.map((f) => f.id), ['open', 'closed']);
+    assert.deepEqual((features[0].geometry as { coordinates: number[][][] }).coordinates[0], [[-105, 39, 0], [-104, 39], [-104, 40], [-105.001, 39.001], [-105, 39, 0]]);
+    assert.equal((features[1].geometry as { coordinates: number[][][] }).coordinates[0].length, 4);
+});
+
+test('sendable - Features CloudTAK would reject are kept back and listed by name & reason', async () => {
+    const feature = (id: string, geometry: unknown) => ({ id, type: 'Feature', properties: { callsign: `Title ${id}`, archived: true }, geometry });
+
+    const { features, notSent } = await Task.sendable([
+        feature('good', { type: 'Point', coordinates: [-105, 39] }),
+        feature('open', { type: 'Polygon', coordinates: [[[-105, 39], [-104, 39], [-104, 40], [-105.00001, 39.00001]]] }),
+    ] as never);
+
+    assert.deepEqual(features.map((f) => f.id), ['good']);
+    assert.equal(notSent.length, 1);
+    assert.equal(notSent[0].id, 'open');
+    assert.equal(notSent[0].title, 'Title open');
+    assert.match(notSent[0].reason, /First and last coordinates/);
+});
+
 test('fromMap - folders become paths, markers styled, geometry-less objects dropped', async () => {
     const task = await Task.init();
 
