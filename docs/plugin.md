@@ -11,6 +11,7 @@ plumbing so an admin never types a GUID or opens **Connections** after the first
 | **CloudTAK ETL Pairs** list | Every pair with its last run, item counts and errors, refreshed every minute | Each Layer's **Layer Runtime Logs** |
 | **+** (new pair) | Pick the Mission by name and enter the CalTopo map. It finds or creates the Data Sync, creates the Layer with the credentials copied from an existing CalTopo Layer, and starts it as a dry run | [Pairing by hand](ADMIN_PAIRING.md) |
 | **Go Live** | Turns the dry run off after you've read the planned changes | Set `DryRun` to `false` in the Layer's Raw View |
+| **Pause** | Stops a live Layer writing to CalTopo and the TAK Mission within a minute, without a redeploy (turns `DryRun` back on). Warns that TAK positions still go to CalTopo and lists the other pairs on the Layer that pause with it. **Go Live** resumes | Set `DryRun` to `true` in the Layer's Raw View, or turn the Layer off (**Edit** → **Enabled**) to stop everything |
 | **Fix** | Shown when a Layer has no Data Sync ("CalTopo → TAK not connected"). Reuses or creates the Mission's Data Sync and links it | [Set up › Part 7](setup.md#part-7-give-the-layer-its-data-sync-and-settings) step 1 |
 | **Items Missing** list | Names each CalTopo object CloudTAK would reject, and why | `warn - CalTopo -> TAK: not sent …` lines in the logs |
 | **Create Caltopo Map** | Creates a team map through the Layer (a flagged CloudTAK Event) and fills it into the pair form | [Creating CalTopo maps](map-creation.md) |
@@ -28,7 +29,7 @@ The ETL-backed plugin is on the plugin's **`etl-backend`** branch until it is me
 run both on the same Mission.
 
 Needs etl-caltopo **5.18.0** or later for the pair list, **5.19.0** for Create Caltopo Map and
-**5.19.1** for the Items Missing list.
+**5.19.1** for the Items Missing list. Pause works with any version.
 
 ## Installing the plugin
 
